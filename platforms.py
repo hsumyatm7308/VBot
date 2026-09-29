@@ -1,5 +1,27 @@
 from urllib.parse import urlparse
 
+import httpx
+
+
+async def resolve_tiktok_url(url: str) -> str:
+    if not (
+        "vt.tiktok.com" in url
+        or "vm.tiktok.com" in url
+    ):
+        return url
+
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=15.0,
+        ) as client:
+            response = await client.get(url)
+
+        return str(response.url)
+
+    except Exception:
+        return url
+
 
 def is_http_url(url: str) -> bool:
     return url.startswith(("http://", "https://"))

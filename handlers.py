@@ -21,7 +21,12 @@ from database import (
     save_terms_acceptance,
 )
 from downloaders import download_tiktok_photo, download_video
-from platforms import get_platform, is_http_url, is_tiktok_photo_url
+from platforms import (
+    get_platform,
+    is_http_url,
+    is_tiktok_photo_url,
+    resolve_tiktok_url,
+)
 from utils import (
     DownloadedFileNotFoundError,
     DownloadFailedError,
@@ -256,13 +261,21 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if platform is None:
         await update.message.reply_text(
-            "❌ ဒီ link ကို support မလုပ်သေးပါဘူး။\n\n"
-            "လက်ရှိ support လုပ်ထားတာတွေက:\n"
-            "• YouTube\n"
-            "• TikTok\n"
-            "• X / Twitter"
+            "❌ ဒီ link ကို support မလုပ်သေးပါဘူး။"
         )
         return
+
+    if platform == "tiktok":
+        url = await resolve_tiktok_url(url)
+
+        # Redirect ပြီးတဲ့ URL ကို ပြန်စစ်
+        platform = get_platform(url)
+
+        if platform is None:
+            await update.message.reply_text(
+                "❌ TikTok link ကို resolve မလုပ်နိုင်ပါ။"
+            )
+            return
 
     is_tiktok_photo = (
         platform == "tiktok"
