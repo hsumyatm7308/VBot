@@ -301,6 +301,108 @@ async def status_command(
         "Daily usage resets automatically each day."
     )
 
+# Tiktok Post Download
+def find_tiktok_photo_files(tmpdir):
+    all_files = [
+        p for p in glob.glob(f"{tmpdir}/**/*", recursive=True)
+        if os.path.isfile(p)
+    ]
+
+    image_exts = {".jpg", ".jpeg", ".png", ".webp"}
+    audio_exts = {".mp3", ".m4a", ".aac", ".wav", ".ogg"}
+
+    images = [
+        p for p in all_files
+        if Path(p).suffix.lower() in image_exts
+    ]
+
+    audios = [
+        p for p in all_files
+        if Path(p).suffix.lower() in audio_exts
+    ]
+
+    return images, audios
+
+
+def make_tiktok_photo_video(image_path, audio_path, output_path):
+    command = [
+        "ffmpeg",
+        "-y",
+        "-loop", "1",
+        "-i", image_path,
+        "-i", audio_path,
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-tune", "stillimage",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-shortest",
+        "-movflags", "+faststart",
+        output_path,
+    ]
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr[-1000:])
+
+
+async def download_tiktok_photo(url, tmpdir):
+    gallery_dir = os.path.join(tmpdir, "tiktok_photo")
+    os.makedirs(gallery_dir, exist_ok=True)
+
+    command = [
+        "gallery-dl",
+        "-D", gallery_dir,
+        url,
+    ]
+
+    result = await asyncio.to_thread(
+        subprocess.run,
+        command,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "TikTok photo download မအောင်မြင်ပါ။\n"
+            + result.stderr[-800:]
+        )
+
+    images, audios = find_tiktok_photo_files(gallery_dir)
+
+    if not images:
+        raise RuntimeError("TikTok photo မတွေ့ပါ။")
+
+    if len(images) > 1:
+        raise RuntimeError(
+            "📸 TikTok Photo Slideshow ကို လက်ရှိ မထောက်ပံ့သေးပါဘူး။"
+        )
+
+    if not audios:
+        raise RuntimeError(
+            "🎵 ဒီ TikTok photo post ရဲ့ audio ကို မတွေ့ပါ။"
+        )
+
+    output_path = os.path.join(tmpdir, "tiktok-photo.mp4")
+
+    await asyncio.to_thread(
+        make_tiktok_photo_video,
+        images[0],
+        audios[0],
+        output_path,
+    )
+
+    return output_path
 
 async def start(
     update: Update,
@@ -345,20 +447,16 @@ def get_platform(url: str):
     except Exception:
         return None
 
-    # Only normal web URLs
     if parsed.scheme not in ("http", "https"):
         return None
 
-    # Reject URLs containing username/password
     if parsed.username or parsed.password:
         return None
 
     host = (parsed.hostname or "").lower().rstrip(".")
     path = parsed.path or "/"
 
-    # -------------------------
     # YouTube
-    # -------------------------
     youtube_hosts = {
         "youtube.com",
         "www.youtube.com",
@@ -369,24 +467,18 @@ def get_platform(url: str):
 
     if host in youtube_hosts:
         if host == "youtu.be":
-            if path.strip("/"):
-                return "youtube"
-            return None
+            return "youtube" if path.strip("/") else None
 
-        valid_youtube_paths = (
+        if path.startswith((
             "/watch",
             "/shorts/",
             "/live/",
-        )
-
-        if path.startswith(valid_youtube_paths):
+        )):
             return "youtube"
 
         return None
 
-    # -------------------------
     # TikTok
-    # -------------------------
     tiktok_hosts = {
         "tiktok.com",
         "www.tiktok.com",
@@ -396,21 +488,23 @@ def get_platform(url: str):
     }
 
     if host in tiktok_hosts:
-        # TikTok short links
-        if host in {"vm.tiktok.com", "vt.tiktok.com"}:
-            if path.strip("/"):
-                return "tiktok"
-            return None
+        if host in {
+            "vm.tiktok.com",
+            "vt.tiktok.com",
+        }:
+            return "tiktok" if path.strip("/") else None
 
-        # Normal TikTok video links
+        # Normal TikTok video
         if "/video/" in path:
+            return "tiktok"
+
+        # TikTok photo post
+        if "/photo/" in path:
             return "tiktok"
 
         return None
 
-    # -------------------------
     # X / Twitter
-    # -------------------------
     twitter_hosts = {
         "x.com",
         "www.x.com",
@@ -427,7 +521,6 @@ def get_platform(url: str):
         return None
 
     return None
-
 
 def build_commands(platform: str, output_template: str, url: str):
     common_options = [
@@ -657,13 +750,10 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parsed = urlparse(url)
     path = parsed.path or ""
 
-    if platform == "tiktok" and "/photo/" in path:
-        await update.message.reply_text(
-            "📸 TikTok Photo/Slideshow posts ကို လက်ရှိ မထောက်ပံ့သေးပါဘူး။\n"
-            "TikTok video links ကိုသာ ပို့ပေးပါ။"
-        )
-        return
-
+    is_tiktok_photo = (
+        platform == "tiktok"
+        and "/photo/" in path
+    )
 
     ACTIVE_USERS.add(user_id)
 
@@ -677,41 +767,53 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
-            output_template = f"{tmpdir}/%(title).80s [%(id)s].%(ext)s"
-
-            commands = build_commands(platform, output_template, url)
-
-            result = None
-            last_error = ""
-
-            for command in commands:
-                result = await asyncio.to_thread(
-                    subprocess.run,
-                    command,
-                    capture_output=True,
-                    text=True,
-                    timeout=300,
-                )
-
-                if result.returncode == 0:
-                    break
-
-                last_error = result.stderr[-1000:]
-
-            if result is None or result.returncode != 0:
+            if is_tiktok_photo:
                 await status_message.edit_text(
-                    "Download မအောင်မြင်ပါ။\n\n"
-                    f"Error:\n{last_error}"
+                    "📸 TikTok photo နဲ့ song ကို ပြင်ဆင်နေပါတယ်..."
                 )
-                return
 
-            files = glob.glob(f"{tmpdir}/*")
+                video_path = await download_tiktok_photo(
+                    url,
+                    tmpdir,
+                )
 
-            if not files:
-                await status_message.edit_text("Downloaded file မတွေ့ပါ။")
-                return
+            else:
+                output_template = f"{tmpdir}/%(title).80s [%(id)s].%(ext)s"
 
-            video_path = max(files, key=os.path.getsize)
+                commands = build_commands(platform, output_template, url)
+
+                result = None
+                last_error = ""
+
+                for command in commands:
+                    result = await asyncio.to_thread(
+                        subprocess.run,
+                        command,
+                        capture_output=True,
+                        text=True,
+                        timeout=300,
+                    )
+
+                    if result.returncode == 0:
+                        break
+
+                    last_error = result.stderr[-1000:]
+
+                if result is None or result.returncode != 0:
+                    await status_message.edit_text(
+                        "Download မအောင်မြင်ပါ။\n\n"
+                        f"Error:\n{last_error}"
+                    )
+                    return
+
+                files = glob.glob(f"{tmpdir}/*")
+
+                if not files:
+                    await status_message.edit_text("Downloaded file မတွေ့ပါ။")
+                    return
+
+                video_path = max(files, key=os.path.getsize)
+
             size_mb = os.path.getsize(video_path) / (1024 * 1024)
 
             if size_mb > MAX_MB:
