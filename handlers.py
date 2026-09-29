@@ -177,6 +177,75 @@ async def status_command(
         "Daily usage resets automatically each day."
     )
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "📖 VDlp Bot အသုံးပြုနည်း\n\n"
+
+        "1️⃣ Download လုပ်ချင်တဲ့ video link ကို copy လုပ်ပါ။\n"
+        "2️⃣ ဒီ bot chat ထဲကို link ကို paste လုပ်ပြီး send လုပ်ပါ။\n"
+        "3️⃣ Bot က video ကို စစ်ပြီး download လုပ်ပေးပါမယ်။\n"
+        "4️⃣ ပြီးသွားရင် video ကို ဒီ chat ထဲမှာ ပို့ပေးပါမယ်။\n\n"
+
+        "✅ Support လုပ်ထားတဲ့ platform တွေ\n"
+        "• YouTube\n"
+        "• TikTok\n"
+        "• X / Twitter\n\n"
+
+        "📌 ဥပမာ\n"
+        "https://www.youtube.com/watch?v=...\n"
+        "https://www.tiktok.com/@user/video/...\n"
+        "https://x.com/user/status/...\n\n"
+
+        "📊 Daily download limit ရှိပါတယ်။\n"
+        "မိမိအသုံးပြုပြီးသားအရေအတွက်ကို /status နဲ့ကြည့်နိုင်ပါတယ်။\n\n"
+
+        "⚠️ ကိုယ်ပိုင် content သို့မဟုတ် download လုပ်ခွင့်ရှိတဲ့ content များအတွက်သာ အသုံးပြုပါ။"
+    )
+
+    await update.message.reply_text(text)
+
+
+# Main Menu
+def get_main_menu_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "📖 How to Use",
+                callback_data="menu_help",
+            ),
+            InlineKeyboardButton(
+                "📊 My Usage",
+                callback_data="menu_status",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "📄 Terms",
+                callback_data="menu_terms",
+            ),
+            InlineKeyboardButton(
+                "📮 Report",
+                callback_data="menu_report",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🆔 My ID",
+                callback_data="menu_myid",
+            ),
+        ],
+    ])
+
+
+def get_back_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "⬅️ Back",
+                callback_data="menu_home",
+            )
+        ]
+    ])
 
 async def start(
     update: Update,
@@ -185,13 +254,24 @@ async def start(
     user_id = update.effective_user.id
 
     if has_accepted_terms(user_id):
-        await update.message.reply_text(
+        text = (
             "👋 Welcome to VDlp Bot!\n\n"
-            "YouTube, TikTok, X/Twitter video link ပို့ပါ။\n"
-            "အသုံးပြုခွင့်ရှိတဲ့ content များအတွက်သာ အသုံးပြုပါ။\n\n"
-            "📄 /terms — Terms of Use\n"
-            "📮 /report — Copyright / Abuse Report\n"
-            "🆔 /myid — Your Telegram ID"
+            "Video link တစ်ခု ပို့လိုက်ရုံနဲ့ download လုပ်ပေးနိုင်ပါတယ်။\n\n"
+            "လက်ရှိ support လုပ်ထားတာတွေ:\n"
+            "• YouTube\n"
+            "• TikTok\n"
+            "• X / Twitter\n\n"
+            "📖 အသုံးပြုနည်းကြည့်ရန် — /help\n"
+            "📊 Daily usage ကြည့်ရန် — /status\n"
+            "📄 Terms of Use — /terms\n"
+            "📮 Copyright / Abuse Report — /report\n"
+            "🆔 Your Telegram ID — /myid\n\n"
+            "အသုံးပြုခွင့်ရှိတဲ့ content များအတွက်သာ အသုံးပြုပါ။"
+        )
+
+        await update.message.reply_text(
+            text,
+            reply_markup=get_main_menu_keyboard(),
         )
     else:
         await update.message.reply_text(
@@ -201,6 +281,123 @@ async def start(
         )
 
         await send_terms(update.message)
+
+
+# Inline menu Handler
+
+async def handle_menu_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    query = update.callback_query
+    await query.answer()
+
+    action = query.data
+    user_id = update.effective_user.id
+
+    if action == "menu_home":
+        text = (
+            "👋 Welcome to VDlp Bot!\n\n"
+            "Video link တစ်ခု ပို့လိုက်ရုံနဲ့ "
+            "download လုပ်ပေးနိုင်ပါတယ်။\n\n"
+
+            "လက်ရှိ support လုပ်ထားတာတွေ:\n"
+            "• YouTube\n"
+            "• TikTok\n"
+            "• X / Twitter\n\n"
+
+            "အောက်က menu ကနေ အသုံးပြုနည်းနဲ့ "
+            "တခြားအချက်အလက်တွေကို ကြည့်နိုင်ပါတယ်။\n\n"
+
+            "⚠️ အသုံးပြုခွင့်ရှိတဲ့ content များအတွက်သာ "
+            "အသုံးပြုပါ။"
+        )
+
+        await query.edit_message_text(
+            text,
+            reply_markup=get_main_menu_keyboard(),
+        )
+        return
+
+    if action == "menu_help":
+        text = (
+            "📖 VDlp Bot အသုံးပြုနည်း\n\n"
+
+            "1️⃣ Download လုပ်ချင်တဲ့ video link ကို copy လုပ်ပါ။\n\n"
+
+            "2️⃣ ဒီ bot chat ထဲကို link ကို paste လုပ်ပြီး "
+            "send လုပ်ပါ။\n\n"
+
+            "3️⃣ Bot က video ကို စစ်ပြီး download လုပ်ပါမယ်။\n\n"
+
+            "4️⃣ ပြီးသွားရင် video ကို ဒီ chat ထဲမှာ "
+            "ပို့ပေးပါမယ်။\n\n"
+
+            "✅ Supported Platforms\n"
+            "• YouTube\n"
+            "• TikTok\n"
+            "• X / Twitter\n\n"
+
+            "📊 တစ်နေ့ download limit ရှိပါတယ်။\n"
+            "My Usage မှာ လက်ကျန်ကို ကြည့်နိုင်ပါတယ်။"
+        )
+
+        await query.edit_message_text(
+            text,
+            reply_markup=get_back_keyboard(),
+        )
+        return
+
+    if action == "menu_status":
+        used = get_daily_usage(user_id)
+        remaining = get_remaining_downloads(user_id)
+
+        text = (
+            "📊 Today's Usage\n\n"
+            f"Used: {used}/{DAILY_LIMIT}\n"
+            f"Remaining: {remaining}"
+        )
+
+        await query.edit_message_text(
+            text,
+            reply_markup=get_back_keyboard(),
+        )
+        return
+
+    if action == "menu_terms":
+        text = get_terms_text()
+
+        await query.edit_message_text(
+            text,
+            reply_markup=get_back_keyboard(),
+        )
+        return
+
+    if action == "menu_report":
+        text = (
+            "📮 Copyright / Abuse Report\n\n"
+            "VDlp Bot နဲ့ပတ်သက်ပြီး copyright၊ abuse "
+            "သို့မဟုတ် အခြားပြဿနာတစ်ခု report လုပ်လိုပါက "
+            f"ဆက်သွယ်ရန်:\n\n{LEGAL_CONTACT}"
+        )
+
+        await query.edit_message_text(
+            text,
+            reply_markup=get_back_keyboard(),
+        )
+        return
+
+    if action == "menu_myid":
+        text = (
+            "🆔 Your Telegram ID\n\n"
+            f"`{user_id}`"
+        )
+
+        await query.edit_message_text(
+            text,
+            reply_markup=get_back_keyboard(),
+            parse_mode="Markdown",
+        )
 
 
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
