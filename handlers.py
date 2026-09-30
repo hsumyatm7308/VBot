@@ -1,12 +1,15 @@
 import asyncio
+import logging
 import subprocess
 import tempfile
 from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from config import (
+    PUBLIC_ACCESS,
     ALLOWED_USERS,
     DAILY_LIMIT,
     LEGAL_CONTACT,
@@ -16,11 +19,23 @@ from config import (
 from database import (
     get_daily_usage,
     get_remaining_downloads,
+    get_user_language,
     has_accepted_terms,
     increment_daily_usage,
     save_terms_acceptance,
+    set_user_language,
 )
-from downloaders import download_tiktok_photo, download_video
+from downloaders import (
+    begin_download,
+    cancel_download,
+    download_tiktok_photo,
+    download_video,
+    finish_download,
+    is_download_active,
+    is_download_cancelled,
+    raise_if_cancelled,
+)
+from i18n import DEFAULT_LANGUAGE, get_text
 from platforms import (
     get_platform,
     is_http_url,
@@ -28,6 +43,7 @@ from platforms import (
     resolve_tiktok_url,
 )
 from utils import (
+    DownloadCancelledError,
     DownloadedFileNotFoundError,
     DownloadFailedError,
     get_file_size_mb,
@@ -35,65 +51,275 @@ from utils import (
 )
 
 
-ACTIVE_USERS = set()
+LOGGER = logging.getLogger(__name__)
+
+ACTIVE_DOWNLOAD_TASKS: dict[int, asyncio.Task] = {}
+ACTIVE_STATUS_MESSAGES = {}
 
 
-def get_terms_text():
-    return (
-        "📄 VDlp Bot — Terms of Use\n\n"
+def is_user_allowed(user_id: int) -> bool:
+    if PUBLIC_ACCESS:
+        return True
 
-        "VDlp Bot ကို အသုံးပြုခြင်းဖြင့် အောက်ပါစည်းကမ်းများကို "
-        "သဘောတူကြောင်း အတည်ပြုရပါမယ်။\n\n"
+    return user_id in ALLOWED_USERS
 
-        "1. ကိုယ်ပိုင် content၊ download လုပ်ခွင့်ရထားသော content၊ "
-        "သို့မဟုတ် ဥပဒေအရ download လုပ်ခွင့်ရှိသော content များအတွက်သာ "
-        "အသုံးပြုရပါမယ်။\n\n"
 
-        "2. Copyright ချိုးဖောက်သော content၊ paid content၊ private content၊ "
-        "login-restricted content သို့မဟုတ် access restrictions ကို "
-        "ကျော်ဖြတ်ရန် VDlp Bot ကို မသုံးရပါ။\n\n"
+async def safe_edit_message(
+    query,
+    text,
+    reply_markup=None,
+    parse_mode=None,
+):
+    try:
+        await query.edit_message_text(
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+        )
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            return
 
-        "3. Video တစ်ခု public ဖြစ်နေခြင်းသည် copyright-free "
-        "ဖြစ်သည်ဟု မဆိုလိုပါ။\n\n"
+        raise
 
-        "4. YouTube, TikTok, X/Twitter နှင့် သက်ဆိုင်ရာ platform များ၏ "
-        "Terms of Service နှင့် သက်ဆိုင်ရာဥပဒေများကို လိုက်နာရန် "
-        "အသုံးပြုသူတွင် တာဝန်ရှိပါသည်။\n\n"
 
-        "5. VDlp Bot သည် download process အတွက် temporary files "
-        "အသုံးပြုပြီး process ပြီးဆုံးသည့်အခါ ဖယ်ရှားရန် ဒီဇိုင်းလုပ်ထားပါသည်။\n\n"
+def get_language(user_id: int) -> str:
+    return get_user_language(user_id) or DEFAULT_LANGUAGE
 
-        "6. Abuse၊ copyright infringement သို့မဟုတ် service misuse "
-        "တွေ့ရှိပါက အသုံးပြုခွင့်ကို ကန့်သတ်/ပိတ်ပင်နိုင်ပါသည်။\n\n"
 
-        f"📮 Copyright / Abuse Reports:\n{LEGAL_CONTACT}\n\n"
-
-        f"Terms version: {TERMS_VERSION}"
+def get_terms_text(language: str = DEFAULT_LANGUAGE) -> str:
+    return get_text(
+        language,
+        "terms",
+        contact=LEGAL_CONTACT,
+        version=TERMS_VERSION,
     )
 
 
-async def send_terms(message):
-    keyboard = InlineKeyboardMarkup(
+def get_language_keyboard(
+    language: str = DEFAULT_LANGUAGE,
+    include_back: bool = False,
+) -> InlineKeyboardMarkup:
+    rows = [
         [
-            [
-                InlineKeyboardButton(
-                    "✅ I Agree",
-                    callback_data=f"terms_accept:{TERMS_VERSION}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "❌ I Don't Agree",
-                    callback_data=f"terms_decline:{TERMS_VERSION}",
-                )
-            ],
+            InlineKeyboardButton("English", callback_data="lang_en"),
+            InlineKeyboardButton("မြန်မာ", callback_data="lang_my"),
         ]
+    ]
+
+    if include_back:
+        rows.append([
+            InlineKeyboardButton(
+                get_text(language, "button_back"),
+                callback_data="menu_home",
+            )
+        ])
+
+    return InlineKeyboardMarkup(rows)
+
+
+def get_main_menu_keyboard(language: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                get_text(language, "button_help"),
+                callback_data="menu_help",
+            ),
+            InlineKeyboardButton(
+                get_text(language, "button_status"),
+                callback_data="menu_status",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                get_text(language, "button_language"),
+                callback_data="menu_language",
+            ),
+            InlineKeyboardButton(
+                get_text(language, "button_terms"),
+                callback_data="menu_terms",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                get_text(language, "button_report"),
+                callback_data="menu_report",
+            ),
+            InlineKeyboardButton(
+                get_text(language, "button_myid"),
+                callback_data="menu_myid",
+            ),
+        ],
+    ])
+
+
+def get_back_keyboard(language: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            get_text(language, "button_back"),
+            callback_data="menu_home",
+        )
+    ]])
+
+
+def get_home_keyboard(language: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            get_text(language, "button_home"),
+            callback_data="menu_home",
+        )
+    ]])
+
+
+def get_cancel_keyboard(language: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            get_text(language, "button_cancel"),
+            callback_data="cancel_download",
+        )
+    ]])
+
+
+def get_terms_keyboard(
+    language: str,
+    acceptance_required: bool,
+) -> InlineKeyboardMarkup:
+    if not acceptance_required:
+        return get_back_keyboard(language)
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                get_text(language, "button_accept"),
+                callback_data=f"terms_accept:{TERMS_VERSION}",
+            ),
+            InlineKeyboardButton(
+                get_text(language, "button_decline"),
+                callback_data=f"terms_decline:{TERMS_VERSION}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                get_text(language, "button_language"),
+                callback_data="menu_language",
+            )
+        ],
+    ])
+
+
+def get_terms_declined_keyboard(language: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            get_text(language, "button_terms"),
+            callback_data="menu_terms",
+        ),
+        InlineKeyboardButton(
+            get_text(language, "button_language"),
+            callback_data="menu_language",
+        ),
+    ]])
+
+
+async def safe_edit_status_message(message, text: str, reply_markup=None):
+    if message is None:
+        return
+
+    try:
+        await message.edit_text(text, reply_markup=reply_markup)
+    except Exception:
+        pass
+
+
+async def send_language_prompt(message, include_back: bool = False):
+    language = get_language(message.from_user.id)
+    await message.reply_text(
+        get_text(language, "language_prompt"),
+        reply_markup=get_language_keyboard(language, include_back),
     )
+
+
+async def require_language(update: Update) -> str | None:
+    user_id = update.effective_user.id
+    language = get_user_language(user_id)
+
+    if language is None:
+        await send_language_prompt(update.message)
+        return None
+
+    return language
+
+
+async def show_home_query(query, language: str):
+    user_id = query.from_user.id
+
+    if not has_accepted_terms(user_id):
+        await safe_edit_message(
+            query,
+            get_terms_text(language),
+            reply_markup=get_terms_keyboard(
+                language,
+                acceptance_required=True,
+            ),
+        )
+        return
+
+    await safe_edit_message(
+        query,
+        get_text(language, "home"),
+        reply_markup=get_main_menu_keyboard(language),
+    )
+
+
+async def send_terms(message, language: str | None = None):
+    user_id = message.from_user.id
+    selected_language = language or get_language(user_id)
+    acceptance_required = not has_accepted_terms(user_id)
 
     await message.reply_text(
-        get_terms_text(),
-        reply_markup=keyboard,
+        get_terms_text(selected_language),
+        reply_markup=get_terms_keyboard(
+            selected_language,
+            acceptance_required,
+        ),
     )
+
+
+async def handle_language_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    query = update.callback_query
+    if query.data not in {"lang_en", "lang_my"}:
+        await query.answer()
+        return
+
+    user_id = update.effective_user.id
+    selected_language = (
+        "en"
+        if query.data == "lang_en"
+        else "my"
+    )
+    current_language = get_user_language(user_id)
+
+    if current_language == selected_language:
+        await query.answer()
+        return
+
+    await query.answer()
+    set_user_language(user_id, selected_language)
+
+    if not has_accepted_terms(user_id):
+        await safe_edit_message(
+            query,
+            get_terms_text(selected_language),
+            reply_markup=get_terms_keyboard(
+                selected_language,
+                acceptance_required=True,
+            ),
+        )
+        return
+
+    await show_home_query(query, selected_language)
 
 
 async def handle_terms_callback(
@@ -104,53 +330,78 @@ async def handle_terms_callback(
     await query.answer()
 
     user_id = query.from_user.id
+    language = get_language(user_id)
     data = query.data
 
     if data.startswith("terms_accept:"):
         version = data.split(":", 1)[1]
 
         if version != TERMS_VERSION:
-            await query.edit_message_text(
-                "Terms ကို update လုပ်ထားပါတယ်။ "
-                "/terms ကိုနှိပ်ပြီး Terms အသစ်ကို ပြန်ဖတ်ပေးပါ။"
+            await safe_edit_message(
+                query,
+                get_text(language, "terms_updated")
+                + "\n\n"
+                + get_terms_text(language),
+                reply_markup=get_terms_keyboard(
+                    language,
+                    acceptance_required=True,
+                ),
             )
             return
 
         save_terms_acceptance(user_id)
 
-        await query.edit_message_text(
-            "✅ Terms accepted.\n\n"
-            "YouTube, TikTok သို့မဟုတ် X/Twitter "
-            "public video link ပို့နိုင်ပါပြီ။"
-        )
+        if get_user_language(user_id) is None:
+            await safe_edit_message(
+                query,
+                get_text(DEFAULT_LANGUAGE, "language_prompt"),
+                reply_markup=get_language_keyboard(),
+            )
+            return
+
+        await show_home_query(query, language)
         return
 
     if data.startswith("terms_decline:"):
-        await query.edit_message_text(
-            "Terms ကို သဘောမတူသောကြောင့် "
-            "VDlp download feature ကို အသုံးပြု၍မရပါ။\n\n"
-            "နောက်မှ ပြန်သဘောတူချင်ရင် /terms ကိုသုံးပါ။"
+        await safe_edit_message(
+            query,
+            get_text(language, "terms_declined"),
+            reply_markup=get_terms_declined_keyboard(language),
         )
 
 
-async def terms_command(
+async def start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    await send_terms(update.message)
+    user_id = update.effective_user.id
+    language = get_user_language(user_id)
 
+    if language is None:
+        await send_language_prompt(update.message)
+        return
 
-async def report_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
+    if not has_accepted_terms(user_id):
+        await send_terms(update.message, language)
+        return
+
     await update.message.reply_text(
-        "📮 Copyright / Abuse Report\n\n"
-        "Report လုပ်လိုသော video URL နှင့် "
-        "report reason ကို အောက်ပါ contact သို့ ပို့ပါ။\n\n"
-        f"{LEGAL_CONTACT}\n\n"
-        "Private information သို့မဟုတ် unnecessary personal data "
-        "မပို့ပါနှင့်။"
+        get_text(language, "home"),
+        reply_markup=get_main_menu_keyboard(language),
+    )
+
+
+async def help_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    language = await require_language(update)
+    if language is None:
+        return
+
+    await update.message.reply_text(
+        get_text(language, "help", daily_limit=DAILY_LIMIT),
+        reply_markup=get_back_keyboard(language),
     )
 
 
@@ -158,132 +409,100 @@ async def status_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    user_id = update.effective_user.id
+    language = await require_language(update)
+    if language is None:
+        return
 
+    user_id = update.effective_user.id
     used = get_daily_usage(user_id)
     remaining = get_remaining_downloads(user_id)
-
-    terms_status = (
-        "✅ Accepted"
+    terms_key = (
+        "terms_accepted"
         if has_accepted_terms(user_id)
-        else "❌ Not accepted"
+        else "terms_not_accepted"
     )
 
     await update.message.reply_text(
-        "📊 VDlp Status\n\n"
-        f"Today's downloads: {used}/{DAILY_LIMIT}\n"
-        f"Remaining: {remaining}\n"
-        f"Terms: {terms_status}\n\n"
-        "Daily usage resets automatically each day."
+        get_text(
+            language,
+            "status",
+            used=used,
+            daily_limit=DAILY_LIMIT,
+            remaining=remaining,
+            terms_status=get_text(language, terms_key),
+        ),
+        reply_markup=get_back_keyboard(language),
     )
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "📖 VDlp Bot အသုံးပြုနည်း\n\n"
 
-        "1️⃣ Download လုပ်ချင်တဲ့ video link ကို copy လုပ်ပါ။\n"
-        "2️⃣ ဒီ bot chat ထဲကို link ကို paste လုပ်ပြီး send လုပ်ပါ။\n"
-        "3️⃣ Bot က video ကို စစ်ပြီး download လုပ်ပေးပါမယ်။\n"
-        "4️⃣ ပြီးသွားရင် video ကို ဒီ chat ထဲမှာ ပို့ပေးပါမယ်။\n\n"
-
-        "✅ Support လုပ်ထားတဲ့ platform တွေ\n"
-        "• YouTube\n"
-        "• TikTok\n"
-        "• X / Twitter\n\n"
-
-        "📌 ဥပမာ\n"
-        "https://www.youtube.com/watch?v=...\n"
-        "https://www.tiktok.com/@user/video/...\n"
-        "https://x.com/user/status/...\n\n"
-
-        "📊 Daily download limit ရှိပါတယ်။\n"
-        "မိမိအသုံးပြုပြီးသားအရေအတွက်ကို /status နဲ့ကြည့်နိုင်ပါတယ်။\n\n"
-
-        "⚠️ ကိုယ်ပိုင် content သို့မဟုတ် download လုပ်ခွင့်ရှိတဲ့ content များအတွက်သာ အသုံးပြုပါ။"
-    )
-
-    await update.message.reply_text(text)
-
-
-# Main Menu
-def get_main_menu_keyboard():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "📖 How to Use",
-                callback_data="menu_help",
-            ),
-            InlineKeyboardButton(
-                "📊 My Usage",
-                callback_data="menu_status",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "📄 Terms",
-                callback_data="menu_terms",
-            ),
-            InlineKeyboardButton(
-                "📮 Report",
-                callback_data="menu_report",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "🆔 My ID",
-                callback_data="menu_myid",
-            ),
-        ],
-    ])
-
-
-def get_back_keyboard():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "⬅️ Back",
-                callback_data="menu_home",
-            )
-        ]
-    ])
-
-async def start(
+async def language_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
     user_id = update.effective_user.id
+    language = get_language(user_id)
+    await update.message.reply_text(
+        get_text(language, "language_prompt"),
+        reply_markup=get_language_keyboard(
+            language,
+            include_back=get_user_language(user_id) is not None,
+        ),
+    )
 
-    if has_accepted_terms(user_id):
-        text = (
-            "👋 Welcome to VDlp Bot!\n\n"
-            "Video link တစ်ခု ပို့လိုက်ရုံနဲ့ download လုပ်ပေးနိုင်ပါတယ်။\n\n"
-            "လက်ရှိ support လုပ်ထားတာတွေ:\n"
-            "• YouTube\n"
-            "• TikTok\n"
-            "• X / Twitter\n\n"
-            "📖 အသုံးပြုနည်းကြည့်ရန် — /help\n"
-            "📊 Daily usage ကြည့်ရန် — /status\n"
-            "📄 Terms of Use — /terms\n"
-            "📮 Copyright / Abuse Report — /report\n"
-            "🆔 Your Telegram ID — /myid\n\n"
-            "အသုံးပြုခွင့်ရှိတဲ့ content များအတွက်သာ အသုံးပြုပါ။"
+
+async def terms_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    language = await require_language(update)
+    if language is None:
+        return
+
+    await send_terms(update.message, language)
+
+
+async def report_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    language = await require_language(update)
+    if language is None:
+        return
+
+    await update.message.reply_text(
+        get_text(language, "report", contact=LEGAL_CONTACT),
+        reply_markup=get_back_keyboard(language),
+    )
+
+
+async def myid(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    language = await require_language(update)
+    if language is None:
+        return
+
+    user = update.effective_user
+    username_line = ""
+    if user.username:
+        username_line = get_text(
+            language,
+            "username_line",
+            username=user.username,
         )
 
-        await update.message.reply_text(
-            text,
-            reply_markup=get_main_menu_keyboard(),
-        )
-    else:
-        await update.message.reply_text(
-            "👋 Welcome to VDlp Bot!\n\n"
-            "Bot ကို စတင်အသုံးပြုရန် Terms of Use ကို "
-            "ဖတ်ပြီး သဘောတူရန်လိုပါတယ်။"
-        )
+    await update.message.reply_text(
+        get_text(
+            language,
+            "myid",
+            user_id=user.id,
+            full_name=user.full_name,
+            username_line=username_line,
+        ),
+        reply_markup=get_back_keyboard(language),
+    )
 
-        await send_terms(update.message)
-
-
-# Inline menu Handler
 
 async def handle_menu_callback(
     update: Update,
@@ -293,184 +512,231 @@ async def handle_menu_callback(
     await query.answer()
 
     action = query.data
-    user_id = update.effective_user.id
+    user_id = query.from_user.id
+    stored_language = get_user_language(user_id)
+
+    if stored_language is None:
+        await safe_edit_message(
+            query,
+            get_text(DEFAULT_LANGUAGE, "language_prompt"),
+            reply_markup=get_language_keyboard(),
+        )
+        return
+
+    language = stored_language
 
     if action == "menu_home":
-        text = (
-            "👋 Welcome to VDlp Bot!\n\n"
-            "Video link တစ်ခု ပို့လိုက်ရုံနဲ့ "
-            "download လုပ်ပေးနိုင်ပါတယ်။\n\n"
-
-            "လက်ရှိ support လုပ်ထားတာတွေ:\n"
-            "• YouTube\n"
-            "• TikTok\n"
-            "• X / Twitter\n\n"
-
-            "အောက်က menu ကနေ အသုံးပြုနည်းနဲ့ "
-            "တခြားအချက်အလက်တွေကို ကြည့်နိုင်ပါတယ်။\n\n"
-
-            "⚠️ အသုံးပြုခွင့်ရှိတဲ့ content များအတွက်သာ "
-            "အသုံးပြုပါ။"
-        )
-
-        await query.edit_message_text(
-            text,
-            reply_markup=get_main_menu_keyboard(),
-        )
+        await show_home_query(query, language)
         return
 
     if action == "menu_help":
-        text = (
-            "📖 VDlp Bot အသုံးပြုနည်း\n\n"
-
-            "1️⃣ Download လုပ်ချင်တဲ့ video link ကို copy လုပ်ပါ။\n\n"
-
-            "2️⃣ ဒီ bot chat ထဲကို link ကို paste လုပ်ပြီး "
-            "send လုပ်ပါ။\n\n"
-
-            "3️⃣ Bot က video ကို စစ်ပြီး download လုပ်ပါမယ်။\n\n"
-
-            "4️⃣ ပြီးသွားရင် video ကို ဒီ chat ထဲမှာ "
-            "ပို့ပေးပါမယ်။\n\n"
-
-            "✅ Supported Platforms\n"
-            "• YouTube\n"
-            "• TikTok\n"
-            "• X / Twitter\n\n"
-
-            "📊 တစ်နေ့ download limit ရှိပါတယ်။\n"
-            "My Usage မှာ လက်ကျန်ကို ကြည့်နိုင်ပါတယ်။"
+        text = get_text(language, "help", daily_limit=DAILY_LIMIT)
+    elif action == "menu_status":
+        terms_key = (
+            "terms_accepted"
+            if has_accepted_terms(user_id)
+            else "terms_not_accepted"
         )
-
-        await query.edit_message_text(
-            text,
-            reply_markup=get_back_keyboard(),
+        text = get_text(
+            language,
+            "status",
+            used=get_daily_usage(user_id),
+            daily_limit=DAILY_LIMIT,
+            remaining=get_remaining_downloads(user_id),
+            terms_status=get_text(language, terms_key),
+        )
+    elif action == "menu_language":
+        await safe_edit_message(
+            query,
+            get_text(language, "language_prompt"),
+            reply_markup=get_language_keyboard(
+                language,
+                include_back=True,
+            ),
         )
         return
-
-    if action == "menu_status":
-        used = get_daily_usage(user_id)
-        remaining = get_remaining_downloads(user_id)
-
-        text = (
-            "📊 Today's Usage\n\n"
-            f"Used: {used}/{DAILY_LIMIT}\n"
-            f"Remaining: {remaining}"
-        )
-
-        await query.edit_message_text(
-            text,
-            reply_markup=get_back_keyboard(),
+    elif action == "menu_terms":
+        await safe_edit_message(
+            query,
+            get_terms_text(language),
+            reply_markup=get_terms_keyboard(
+                language,
+                acceptance_required=not has_accepted_terms(user_id),
+            ),
         )
         return
-
-    if action == "menu_terms":
-        text = get_terms_text()
-
-        await query.edit_message_text(
-            text,
-            reply_markup=get_back_keyboard(),
+    elif action == "menu_report":
+        text = get_text(language, "report", contact=LEGAL_CONTACT)
+    elif action == "menu_myid":
+        user = query.from_user
+        username_line = ""
+        if user.username:
+            username_line = get_text(
+                language,
+                "username_line",
+                username=user.username,
+            )
+        text = get_text(
+            language,
+            "myid",
+            user_id=user.id,
+            full_name=user.full_name,
+            username_line=username_line,
         )
+    else:
         return
 
-    if action == "menu_report":
-        text = (
-            "📮 Copyright / Abuse Report\n\n"
-            "VDlp Bot နဲ့ပတ်သက်ပြီး copyright၊ abuse "
-            "သို့မဟုတ် အခြားပြဿနာတစ်ခု report လုပ်လိုပါက "
-            f"ဆက်သွယ်ရန်:\n\n{LEGAL_CONTACT}"
-        )
-
-        await query.edit_message_text(
-            text,
-            reply_markup=get_back_keyboard(),
-        )
-        return
-
-    if action == "menu_myid":
-        text = (
-            "🆔 Your Telegram ID\n\n"
-            f"`{user_id}`"
-        )
-
-        await query.edit_message_text(
-            text,
-            reply_markup=get_back_keyboard(),
-            parse_mode="Markdown",
-        )
+    await safe_edit_message(
+        query,
+        text,
+        reply_markup=get_back_keyboard(language),
+    )
 
 
-async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
+async def request_download_cancellation(user_id: int) -> bool:
+    cancelled = await cancel_download(user_id)
 
-    text = f"Your Telegram user ID is:\n{user.id}\n\nName: {user.full_name}"
+    if not cancelled:
+        return False
 
-    if user.username:
-        text += f"\nUsername: @{user.username}"
+    task = ACTIVE_DOWNLOAD_TASKS.get(user_id)
+    current_task = asyncio.current_task()
 
-    await update.message.reply_text(text)
+    if (
+        task is not None
+        and task is not current_task
+        and not task.done()
+    ):
+        task.cancel()
+
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(task),
+                timeout=5,
+            )
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+
+    return True
 
 
-async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cancel_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     user_id = update.effective_user.id
+    language = get_language(user_id)
+    status_message = ACTIVE_STATUS_MESSAGES.get(user_id)
+    cancelled = await request_download_cancellation(user_id)
 
-    if user_id not in ALLOWED_USERS:
+    if not cancelled:
         await update.message.reply_text(
-            "This bot is currently private. You are not allowed to use it."
+            get_text(language, "no_active_download"),
+            reply_markup=get_home_keyboard(language),
         )
         return
 
-    print("User ID:", update.effective_user.id)
-    print("Username:", update.effective_user.username)
+    if status_message is not None:
+        await safe_edit_status_message(
+            status_message,
+            get_text(language, "cancelled"),
+            reply_markup=get_home_keyboard(language),
+        )
+    else:
+        await update.message.reply_text(
+            get_text(language, "cancelled"),
+            reply_markup=get_home_keyboard(language),
+        )
+
+
+async def handle_cancel_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    language = get_language(user_id)
+    cancelled = await request_download_cancellation(user_id)
+    text_key = "cancelled" if cancelled else "no_active_download"
+
+    await safe_edit_message(
+        query,
+        get_text(language, text_key),
+        reply_markup=get_home_keyboard(language),
+    )
+
+
+async def handle_url(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    user_id = update.effective_user.id
+    language = get_language(user_id)
+
+    if not PUBLIC_ACCESS and user_id not in ALLOWED_USERS:
+        await update.message.reply_text(
+            get_text(language, "private_access")
+        )
+        return
+
+    LOGGER.info(
+        "Download request from user %s (%s)",
+        user_id,
+        update.effective_user.username,
+    )
+
+    stored_language = get_user_language(user_id)
+    if stored_language is None:
+        await send_language_prompt(update.message)
+        return
+
+    language = stored_language
 
     if not has_accepted_terms(user_id):
-        await update.message.reply_text(
-            "⚠️ Download မလုပ်ခင် Terms of Use ကို သဘောတူရန်လိုပါတယ်."
-        )
-
-        await send_terms(update.message)
+        await send_terms(update.message, language)
         return
 
     used_today = get_daily_usage(user_id)
-
     if used_today >= DAILY_LIMIT:
         await update.message.reply_text(
-            "🚫 ဒီနေ့ download limit ပြည့်သွားပါပြီ။\n\n"
-            f"Daily limit: {DAILY_LIMIT}\n"
-            "နောက်နေ့မှ ပြန်အသုံးပြုနိုင်ပါမယ်။"
+            get_text(
+                language,
+                "daily_limit_reached",
+                daily_limit=DAILY_LIMIT,
+            ),
+            reply_markup=get_home_keyboard(language),
         )
         return
 
-    if user_id in ACTIVE_USERS:
+    if is_download_active(user_id):
         await update.message.reply_text(
-            "⏳ လက်ရှိ download တစ်ခု လုပ်နေပါတယ်။ "
-            "အဲ့ဒီ download ပြီးမှ နောက်တစ်ခု ပို့ပေးပါ။"
+            get_text(language, "active_download")
         )
         return
 
     url = update.message.text.strip()
-
     if not is_http_url(url):
-        await update.message.reply_text("Valid URL တစ်ခု ပို့ပါ။")
+        await update.message.reply_text(
+            get_text(language, "invalid_url")
+        )
         return
 
     platform = get_platform(url)
-
     if platform is None:
         await update.message.reply_text(
-            "❌ ဒီ link ကို support မလုပ်သေးပါဘူး။"
+            get_text(language, "unsupported_url")
         )
         return
 
     if platform == "tiktok":
         url = await resolve_tiktok_url(url)
-
-        # Redirect ပြီးတဲ့ URL ကို ပြန်စစ်
         platform = get_platform(url)
 
         if platform is None:
             await update.message.reply_text(
-                "❌ TikTok link ကို resolve မလုပ်နိုင်ပါ။"
+                get_text(language, "tiktok_resolve_failed")
             )
             return
 
@@ -479,44 +745,88 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         and is_tiktok_photo_url(url)
     )
 
-    ACTIVE_USERS.add(user_id)
+    begin_download(user_id)
+    current_task = asyncio.current_task()
+    if current_task is not None:
+        ACTIVE_DOWNLOAD_TASKS[user_id] = current_task
 
-    status_message = await update.message.reply_text(
-        "Checking video... ခဏစောင့်ပါ။"
-    )
+    status_message = None
     stop_event = asyncio.Event()
-    status_task = asyncio.create_task(
-        keep_user_updated(status_message, stop_event)
-    )
+    status_task = None
+    cancel_keyboard = get_cancel_keyboard(language)
+    download_finished = False
 
     try:
+        status_message = await update.message.reply_text(
+            get_text(language, "checking"),
+            reply_markup=cancel_keyboard,
+        )
+        ACTIVE_STATUS_MESSAGES[user_id] = status_message
+
+        await status_message.edit_text(
+            get_text(language, "downloading"),
+            reply_markup=cancel_keyboard,
+        )
+        status_task = asyncio.create_task(
+            keep_user_updated(
+                status_message,
+                stop_event,
+                language,
+                reply_markup=cancel_keyboard,
+            )
+        )
+
         with tempfile.TemporaryDirectory() as tmpdir:
             if is_tiktok_photo:
                 await status_message.edit_text(
-                    "📸 TikTok photo နဲ့ song ကို ပြင်ဆင်နေပါတယ်..."
+                    get_text(language, "preparing_media"),
+                    reply_markup=cancel_keyboard,
                 )
-
                 video_path = await download_tiktok_photo(
                     url,
                     tmpdir,
+                    user_id,
                 )
             else:
                 video_path = await download_video(
                     platform,
                     url,
                     tmpdir,
+                    user_id,
                 )
 
+            raise_if_cancelled(user_id)
+
+            stop_event.set()
+            if status_task is not None:
+                status_task.cancel()
+                try:
+                    await status_task
+                except asyncio.CancelledError:
+                    task = asyncio.current_task()
+                    if task is not None and task.cancelling():
+                        raise
+                status_task = None
+
+            raise_if_cancelled(user_id)
             size_mb = get_file_size_mb(video_path)
 
             if size_mb > MAX_MB:
                 await status_message.edit_text(
-                    f"File size က {size_mb:.1f}MB ဖြစ်နေတယ်။ "
-                    "Telegram bot က 50MB အထိပဲ ပို့နိုင်လို့ မပို့နိုင်ပါ။"
+                    get_text(
+                        language,
+                        "file_too_large",
+                        size_mb=size_mb,
+                        max_mb=MAX_MB,
+                    ),
+                    reply_markup=get_home_keyboard(language),
                 )
                 return
 
-            await status_message.edit_text("Upload လုပ်နေပါတယ်...")
+            await status_message.edit_text(
+                get_text(language, "uploading"),
+                reply_markup=cancel_keyboard,
+            )
 
             with open(video_path, "rb") as video:
                 await update.message.reply_video(
@@ -526,40 +836,96 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
             increment_daily_usage(user_id)
+            finish_download(user_id)
+            download_finished = True
 
             used = get_daily_usage(user_id)
             remaining = get_remaining_downloads(user_id)
 
-            await status_message.edit_text(
-                "ပြီးပါပြီ ✅\n\n"
-                f"Today's usage: {used}/{DAILY_LIMIT}\n"
-                f"Remaining: {remaining}"
+            await safe_edit_status_message(
+                status_message,
+                get_text(
+                    language,
+                    "done",
+                    used=used,
+                    daily_limit=DAILY_LIMIT,
+                    remaining=remaining,
+                ),
+                reply_markup=get_home_keyboard(language),
             )
 
-    except DownloadFailedError as error:
-        await status_message.edit_text(
-            "Download မအောင်မြင်ပါ။\n\n"
-            f"Error:\n{error.last_error}"
+    except DownloadCancelledError:
+        await safe_edit_status_message(
+            status_message,
+            get_text(language, "cancelled"),
+            reply_markup=get_home_keyboard(language),
+        )
+
+    except DownloadFailedError:
+        await safe_edit_status_message(
+            status_message,
+            get_text(language, "download_failed"),
+            reply_markup=get_home_keyboard(language),
         )
 
     except DownloadedFileNotFoundError:
-        await status_message.edit_text("Downloaded file မတွေ့ပါ။")
-
-    except subprocess.TimeoutExpired:
-        await status_message.edit_text(
-            "Download အချိန်ကြာလွန်းလို့ ရပ်လိုက်ပါတယ်။"
+        LOGGER.warning("Downloaded file missing for user %s", user_id)
+        await safe_edit_status_message(
+            status_message,
+            get_text(language, "download_failed"),
+            reply_markup=get_home_keyboard(language),
         )
 
-    except Exception as error:
-        await status_message.edit_text(f"Error ဖြစ်ပါတယ်: {error}")
+    except subprocess.TimeoutExpired:
+        LOGGER.warning("Download timed out for user %s", user_id)
+        await safe_edit_status_message(
+            status_message,
+            get_text(language, "download_timeout"),
+            reply_markup=get_home_keyboard(language),
+        )
+
+    except asyncio.CancelledError:
+        if is_download_cancelled(user_id):
+            await safe_edit_status_message(
+                status_message,
+                get_text(language, "cancelled"),
+                reply_markup=get_home_keyboard(language),
+            )
+        else:
+            raise
+
+    except Exception:
+        LOGGER.exception("Unexpected download error for user %s", user_id)
+        await safe_edit_status_message(
+            status_message,
+            get_text(language, "download_failed"),
+            reply_markup=get_home_keyboard(language),
+        )
 
     finally:
-        ACTIVE_USERS.discard(user_id)
-
         stop_event.set()
-        status_task.cancel()
+        propagate_cancellation = False
 
-        try:
-            await status_task
-        except asyncio.CancelledError:
-            pass
+        if status_task is not None:
+            status_task.cancel()
+            try:
+                await status_task
+            except asyncio.CancelledError:
+                task = asyncio.current_task()
+                propagate_cancellation = (
+                    task is not None
+                    and task.cancelling() > 0
+                    and not is_download_cancelled(user_id)
+                )
+
+        if ACTIVE_DOWNLOAD_TASKS.get(user_id) is current_task:
+            ACTIVE_DOWNLOAD_TASKS.pop(user_id, None)
+
+        if ACTIVE_STATUS_MESSAGES.get(user_id) is status_message:
+            ACTIVE_STATUS_MESSAGES.pop(user_id, None)
+
+        if not download_finished:
+            finish_download(user_id)
+
+        if propagate_cancellation:
+            raise asyncio.CancelledError

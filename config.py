@@ -20,10 +20,11 @@ LEGAL_CONTACT = os.getenv(
     "Not configured",
 )
 
+PUBLIC_ACCESS = os.getenv(
+    "PUBLIC_ACCESS",
+    "false",
+).lower() == "true"
+
 ALLOWED_USERS = {
     5531100901,
-    1652119664,
-    1739242512,
-    444444444,
-    555555555,
 }

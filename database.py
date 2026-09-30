@@ -27,6 +27,15 @@ def init_legal_db():
             """
         )
 
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_preferences (
+                user_id INTEGER PRIMARY KEY,
+                language TEXT NOT NULL
+            )
+            """
+        )
+
         conn.commit()
 
 
@@ -117,4 +126,42 @@ def increment_daily_usage(user_id: int):
             (user_id, today),
         )
 
+        conn.commit()
+
+
+def get_user_language(user_id: int) -> str | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            """
+            SELECT language
+            FROM user_preferences
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+
+    if row is None:
+        return None
+
+    return row[0]
+
+
+def has_user_language(user_id: int) -> bool:
+    return get_user_language(user_id) is not None
+
+
+def set_user_language(user_id: int, language: str):
+    if language not in {"en", "my"}:
+        raise ValueError("Unsupported language")
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO user_preferences (user_id, language)
+            VALUES (?, ?)
+            ON CONFLICT(user_id)
+            DO UPDATE SET language = excluded.language
+            """,
+            (user_id, language),
+        )
         conn.commit()
