@@ -13,6 +13,7 @@ from config import (
     ALLOWED_USERS,
     DAILY_LIMIT,
     LEGAL_CONTACT,
+    MAX_DURATION_SECONDS,
     MAX_MB,
     TERMS_VERSION,
 )
@@ -44,6 +45,8 @@ from platforms import (
 )
 from utils import (
     DownloadCancelledError,
+    DownloadDurationLimitError,
+    DownloadFileTooLargeError,
     DownloadedFileNotFoundError,
     DownloadFailedError,
     get_file_size_mb,
@@ -815,7 +818,7 @@ async def handle_url(
                 await status_message.edit_text(
                     get_text(
                         language,
-                        "file_too_large",
+                        "file_too_large_with_size",
                         size_mb=size_mb,
                         max_mb=MAX_MB,
                     ),
@@ -858,6 +861,24 @@ async def handle_url(
         await safe_edit_status_message(
             status_message,
             get_text(language, "cancelled"),
+            reply_markup=get_home_keyboard(language),
+        )
+
+    except DownloadDurationLimitError:
+        await safe_edit_status_message(
+            status_message,
+            get_text(
+                language,
+                "video_too_long",
+                max_duration_minutes=MAX_DURATION_SECONDS / 60,
+            ),
+            reply_markup=get_home_keyboard(language),
+        )
+
+    except DownloadFileTooLargeError:
+        await safe_edit_status_message(
+            status_message,
+            get_text(language, "file_too_large"),
             reply_markup=get_home_keyboard(language),
         )
 

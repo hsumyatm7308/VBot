@@ -10,6 +10,18 @@ class DownloadFailedError(RuntimeError):
         self.last_error = last_error
 
 
+class DownloadFileTooLargeError(RuntimeError):
+    def __init__(self, last_error: str):
+        super().__init__(last_error)
+        self.last_error = last_error
+
+
+class DownloadDurationLimitError(RuntimeError):
+    def __init__(self, last_error: str):
+        super().__init__(last_error)
+        self.last_error = last_error
+
+
 class DownloadedFileNotFoundError(RuntimeError):
     pass
 

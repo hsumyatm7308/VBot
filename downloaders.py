@@ -2,12 +2,20 @@ import asyncio
 import glob
 import logging
 import os
+import re
 import signal
 import subprocess
 from pathlib import Path
 
-from config import TWITTER_PROXY
+from config import (
+    INSTAGRAM_PROXY,
+    MAX_DURATION_SECONDS,
+    MAX_MB,
+    TWITTER_PROXY,
+)
 from utils import (
+    DownloadDurationLimitError,
+    DownloadFileTooLargeError,
     DownloadedFileNotFoundError,
     DownloadCancelledError,
     DownloadFailedError,
@@ -20,6 +28,40 @@ LOGGER = logging.getLogger(__name__)
 ACTIVE_USERS: set[int] = set()
 ACTIVE_PROCESSES: dict[int, asyncio.subprocess.Process] = {}
 CANCEL_REQUESTS: set[int] = set()
+
+
+def is_file_too_large_error(error_text: str) -> bool:
+    normalized_error = error_text.lower()
+    unsupported_option_errors = (
+        "no such option",
+        "unknown option",
+        "unrecognized option",
+    )
+
+    if (
+        "max-filesize" in normalized_error
+        and any(
+            marker in normalized_error
+            for marker in unsupported_option_errors
+        )
+    ):
+        return False
+
+    return (
+        "max-filesize" in normalized_error
+        or "file is larger than" in normalized_error
+    )
+
+
+def is_duration_limit_error(error_text: str) -> bool:
+    normalized_error = " ".join(error_text.lower().split())
+    duration_filter = re.compile(
+        rf"\bduration\s*<=\s*{MAX_DURATION_SECONDS}\b"
+    )
+    return (
+        "does not pass filter" in normalized_error
+        and duration_filter.search(normalized_error) is not None
+    )
 
 
 def begin_download(user_id: int):
@@ -269,8 +311,8 @@ async def download_tiktok_photo(url, tmpdir, user_id):
 def build_commands(platform: str, output_template: str, url: str):
     common_options = [
         "--no-playlist",
-        "--max-filesize", "45M",
-        "--match-filter", "duration <= 600",
+        "--max-filesize", f"{MAX_MB}M",
+        "--match-filter", f"duration <= {MAX_DURATION_SECONDS}",
     ]
 
     if platform == "youtube":
@@ -407,6 +449,43 @@ def build_commands(platform: str, output_template: str, url: str):
                 url,
             ],
         ]
+    if platform == "instagram":
+        proxy_args = (
+            ["--proxy", INSTAGRAM_PROXY]
+            if INSTAGRAM_PROXY
+            else []
+        )
+
+        return [
+            [
+                "yt-dlp",
+                *common_options,
+                *proxy_args,
+                "--retries", "2",
+                "--socket-timeout", "30",
+                "-f",
+                "b[ext=mp4][height<=720]/b[ext=mp4]/best",
+                "--merge-output-format",
+                "mp4",
+                "-o",
+                output_template,
+                url,
+            ],
+            [
+                "yt-dlp",
+                *common_options,
+                *proxy_args,
+                "--retries", "2",
+                "--socket-timeout", "45",
+                "-f",
+                "best",
+                "--merge-output-format",
+                "mp4",
+                "-o",
+                output_template,
+                url,
+            ],
+        ]
 
     return []
 
@@ -429,8 +508,9 @@ async def download_video(
     output_template = f"{tmpdir}/%(title).80s [%(id)s].%(ext)s"
     commands = build_commands(platform, output_template, url)
 
-    result = None
     last_error = ""
+    too_large_error = ""
+    duration_limit_error = ""
 
     for command in commands:
         result = await run_command(
@@ -438,19 +518,48 @@ async def download_video(
             user_id,
             timeout=300,
         )
+        command_output = "\n".join(
+            output
+            for output in (result.stdout, result.stderr)
+            if output
+        )
+        output_tail = error_tail(command_output, 1000)
+        duration_limited = is_duration_limit_error(command_output)
+        file_too_large = is_file_too_large_error(command_output)
+
+        if duration_limited:
+            duration_limit_error = output_tail
+
+        if file_too_large:
+            too_large_error = output_tail
 
         if result.returncode == 0:
-            break
+            try:
+                return find_downloaded_file(tmpdir)
+            except DownloadedFileNotFoundError:
+                if not duration_limited and not file_too_large:
+                    last_error = (
+                        output_tail
+                        or "yt-dlp completed without creating a file."
+                    )
 
-        last_error = error_tail(result.stderr, 1000)
+                continue
 
-    if result is None or result.returncode != 0:
-        LOGGER.warning(
-            "All yt-dlp attempts failed for user %s on %s: %s",
-            user_id,
-            platform,
-            last_error,
+        last_error = (
+            output_tail
+            or f"yt-dlp exited with code {result.returncode}."
         )
-        raise DownloadFailedError(last_error)
 
-    return find_downloaded_file(tmpdir)
+    if duration_limit_error:
+        raise DownloadDurationLimitError(duration_limit_error)
+
+    if too_large_error:
+        raise DownloadFileTooLargeError(too_large_error)
+
+    LOGGER.warning(
+        "All yt-dlp attempts failed for user %s on %s: %s",
+        user_id,
+        platform,
+        last_error,
+    )
+    raise DownloadFailedError(last_error)

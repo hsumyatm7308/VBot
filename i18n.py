@@ -15,7 +15,8 @@ TEXTS = {
             "Supported\n"
             "YouTube\n"
             "TikTok\n"
-            "X\n\n"
+            "X\n"
+            "Instagram\n\n"
             "Daily limit: {daily_limit}"
         ),
         "status": (
@@ -84,8 +85,17 @@ TEXTS = {
         ),
         "file_too_large": (
             "File too large\n\n"
+            "This video exceeds the current download size limit."
+        ),
+        "file_too_large_with_size": (
+            "File too large\n\n"
             "Size: {size_mb:.1f} MB\n"
             "Limit: {max_mb} MB"
+        ),
+        "video_too_long": (
+            "Video too long\n\n"
+            "This video exceeds the current "
+            "{max_duration_minutes:g}-minute limit."
         ),
         "download_failed": (
             "Download failed\n\n"
@@ -121,7 +131,8 @@ TEXTS = {
             "Support လုပ်ထားသည်များ\n"
             "YouTube\n"
             "TikTok\n"
-            "X\n\n"
+            "X\n"
+            "Instagram\n\n"
             "တစ်ရက်ကန့်သတ်ချက်: {daily_limit}"
         ),
         "status": (
@@ -193,9 +204,18 @@ TEXTS = {
             "လက်ကျန်: {remaining}"
         ),
         "file_too_large": (
+            "File အရွယ်အစားကြီးလွန်းပါတယ်\n\n"
+            "ဒီ video က လက်ရှိ download size limit ထက်ကျော်နေပါတယ်။"
+        ),
+        "file_too_large_with_size": (
             "File အရွယ်အစား ကြီးလွန်းပါသည်\n\n"
             "အရွယ်အစား: {size_mb:.1f} MB\n"
             "ကန့်သတ်ချက်: {max_mb} MB"
+        ),
+        "video_too_long": (
+            "Video အချိန်ရှည်လွန်းပါတယ်\n\n"
+            "ဒီ video က လက်ရှိ {max_duration_minutes:g} မိနစ် "
+            "limit ထက် ကျော်နေပါတယ်။"
         ),
         "download_failed": (
             "Download မအောင်မြင်ပါ\n\n"

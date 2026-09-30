@@ -106,6 +106,24 @@ def get_platform(url: str):
 
         return None
 
+    # Instagram
+    instagram_hosts = {
+    "instagram.com",
+    "www.instagram.com",
+    "m.instagram.com",
+}
+
+    if host in instagram_hosts:
+        if path.startswith((
+            "/reel/",
+            "/reels/",
+            "/p/",
+            "/tv/",
+        )):
+            return "instagram"
+
+        return None
+
     return None
 
 
