@@ -2,6 +2,7 @@ import asyncio
 import logging
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -58,6 +59,14 @@ LOGGER = logging.getLogger(__name__)
 
 ACTIVE_DOWNLOAD_TASKS: dict[int, asyncio.Task] = {}
 ACTIVE_STATUS_MESSAGES = {}
+
+
+def log_performance(platform: str, stage: str, started_at: float):
+    elapsed = time.perf_counter() - started_at
+    print(
+        f"[PERF] platform={platform} {stage}={elapsed:.2f}s",
+        flush=True,
+    )
 
 
 def is_user_allowed(user_id: int) -> bool:
@@ -675,6 +684,7 @@ async def handle_url(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+    request_started_at = time.perf_counter()
     user_id = update.effective_user.id
     language = get_language(user_id)
 
@@ -734,10 +744,32 @@ async def handle_url(
         return
 
     if platform == "tiktok":
-        url = await resolve_tiktok_url(url)
+        resolve_started_at = time.perf_counter()
+        resolve_succeeded = False
+        try:
+            url = await resolve_tiktok_url(url)
+            resolve_succeeded = True
+        finally:
+            log_performance(
+                platform,
+                "resolve",
+                resolve_started_at,
+            )
+            if not resolve_succeeded:
+                log_performance(
+                    platform,
+                    "total",
+                    request_started_at,
+                )
+
         platform = get_platform(url)
 
         if platform is None:
+            log_performance(
+                "tiktok",
+                "total",
+                request_started_at,
+            )
             await update.message.reply_text(
                 get_text(language, "tiktok_resolve_failed")
             )
@@ -813,6 +845,10 @@ async def handle_url(
 
             raise_if_cancelled(user_id)
             size_mb = get_file_size_mb(video_path)
+            print(
+                f"[PERF] platform={platform} file_size={size_mb:.2f}MB",
+                flush=True,
+            )
 
             if size_mb > MAX_MB:
                 await status_message.edit_text(
@@ -831,11 +867,23 @@ async def handle_url(
                 reply_markup=cancel_keyboard,
             )
 
-            with open(video_path, "rb") as video:
-                await update.message.reply_video(
-                    video=video,
-                    caption=Path(video_path).name,
-                    supports_streaming=True,
+            upload_started_at = time.perf_counter()
+            try:
+                with open(video_path, "rb") as video:
+                    await update.message.reply_video(
+                        video=video,
+                        caption=Path(video_path).name,
+                        supports_streaming=True,
+                        read_timeout=120,
+                        write_timeout=120,
+                        connect_timeout=30,
+                        pool_timeout=30,
+                    )
+            finally:
+                log_performance(
+                    platform,
+                    "upload",
+                    upload_started_at,
                 )
 
             increment_daily_usage(user_id)
@@ -947,6 +995,12 @@ async def handle_url(
 
         if not download_finished:
             finish_download(user_id)
+
+        log_performance(
+            platform,
+            "total",
+            request_started_at,
+        )
 
         if propagate_cancellation:
             raise asyncio.CancelledError

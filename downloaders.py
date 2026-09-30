@@ -1,10 +1,12 @@
 import asyncio
 import glob
+import json
 import logging
 import os
 import re
 import signal
 import subprocess
+import time
 from pathlib import Path
 
 from config import (
@@ -28,6 +30,52 @@ LOGGER = logging.getLogger(__name__)
 ACTIVE_USERS: set[int] = set()
 ACTIVE_PROCESSES: dict[int, asyncio.subprocess.Process] = {}
 CANCEL_REQUESTS: set[int] = set()
+
+YOUTUBE_1080_FORMAT = (
+    "bv*[vcodec^=avc1][height<=1080]"
+    "+ba[acodec^=mp4a]"
+    "/b[ext=mp4][height<=1080]"
+)
+YOUTUBE_720_FORMAT = (
+    "bv*[vcodec^=avc1][height<=720]"
+    "+ba[acodec^=mp4a]"
+    "/b[ext=mp4][height<=720]"
+)
+YOUTUBE_480_FORMAT = (
+    "b[ext=mp4][height<=480]"
+    "/best[height<=480]"
+    "/best"
+)
+YOUTUBE_FORMATS = (
+    YOUTUBE_1080_FORMAT,
+    YOUTUBE_720_FORMAT,
+    YOUTUBE_480_FORMAT,
+)
+YOUTUBE_QUALITY_HEIGHTS = {
+    YOUTUBE_1080_FORMAT: 1080,
+    YOUTUBE_720_FORMAT: 720,
+    YOUTUBE_480_FORMAT: 480,
+}
+YOUTUBE_PLAYER_CLIENT_FALLBACKS = (
+    (
+        "--extractor-args",
+        "youtube:player_client=default,-android_sdkless",
+    ),
+    (
+        "--extractor-args",
+        "youtube:player_client=android",
+    ),
+    (),
+)
+YOUTUBE_SIZE_SAFETY_RATIO = 0.9
+
+
+def log_performance(platform: str, stage: str, started_at: float):
+    elapsed = time.perf_counter() - started_at
+    print(
+        f"[PERF] platform={platform} {stage}={elapsed:.2f}s",
+        flush=True,
+    )
 
 
 def is_file_too_large_error(error_text: str) -> bool:
@@ -190,6 +238,239 @@ async def run_command(command, user_id: int, timeout: int):
     )
 
 
+def build_youtube_metadata_commands(url: str):
+    common_options = [
+        "--no-playlist",
+        "--skip-download",
+        "--dump-single-json",
+        "--match-filter", f"duration <= {MAX_DURATION_SECONDS}",
+    ]
+
+    return [
+        [
+            "yt-dlp",
+            *common_options,
+            *player_client_options,
+            url,
+        ]
+        for player_client_options in YOUTUBE_PLAYER_CLIENT_FALLBACKS
+    ]
+
+
+def parse_youtube_metadata(output: str):
+    candidates = [output, *reversed(output.splitlines())]
+
+    for candidate in candidates:
+        try:
+            metadata = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        if isinstance(metadata, dict):
+            return metadata
+
+    return None
+
+
+def positive_number(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    if number <= 0:
+        return None
+
+    return number
+
+
+def estimate_format_size(format_info: dict, duration):
+    for size_key in ("filesize", "filesize_approx"):
+        size = positive_number(format_info.get(size_key))
+        if size is not None:
+            return size
+
+    media_duration = (
+        positive_number(duration)
+        or positive_number(format_info.get("duration"))
+    )
+    if media_duration is None:
+        return None
+
+    bitrate = positive_number(format_info.get("tbr"))
+    if bitrate is None:
+        if str(format_info.get("vcodec", "none")) == "none":
+            bitrate = positive_number(format_info.get("abr"))
+        elif str(format_info.get("acodec", "none")) == "none":
+            bitrate = positive_number(format_info.get("vbr"))
+
+    if bitrate is None:
+        return None
+
+    return bitrate * 1000 * media_duration / 8
+
+
+def format_quality_key(format_info: dict):
+    return (
+        positive_number(format_info.get("height")) or 0,
+        positive_number(format_info.get("fps")) or 0,
+        positive_number(format_info.get("tbr"))
+        or positive_number(format_info.get("vbr"))
+        or positive_number(format_info.get("abr"))
+        or 0,
+    )
+
+
+def estimate_youtube_quality_size(
+    metadata: dict,
+    max_height: int,
+    prefer_separate_streams: bool,
+):
+    formats = metadata.get("formats") or []
+    duration = metadata.get("duration")
+
+    video_formats = [
+        format_info
+        for format_info in formats
+        if str(format_info.get("vcodec", "none")).startswith("avc1")
+        and str(format_info.get("acodec", "none")) == "none"
+        and (positive_number(format_info.get("height")) or 0) <= max_height
+    ]
+    audio_formats = [
+        format_info
+        for format_info in formats
+        if str(format_info.get("vcodec", "none")) == "none"
+        and str(format_info.get("acodec", "none")).startswith("mp4a")
+    ]
+
+    if prefer_separate_streams and video_formats and audio_formats:
+        video_format = max(video_formats, key=format_quality_key)
+        audio_format = max(audio_formats, key=format_quality_key)
+        video_size = estimate_format_size(video_format, duration)
+        audio_size = estimate_format_size(audio_format, duration)
+
+        if video_size is not None and audio_size is not None:
+            return video_size + audio_size
+
+        return None
+
+    progressive_formats = [
+        format_info
+        for format_info in formats
+        if str(format_info.get("vcodec", "none")) != "none"
+        and str(format_info.get("acodec", "none")) != "none"
+        and (positive_number(format_info.get("height")) or 0) <= max_height
+    ]
+
+    if not progressive_formats:
+        return None
+
+    def progressive_quality_key(format_info):
+        preferred_codecs = (
+            str(format_info.get("vcodec", "")).startswith("avc1")
+            and str(format_info.get("acodec", "")).startswith("mp4a")
+        )
+        return (
+            preferred_codecs,
+            format_info.get("ext") == "mp4",
+            *format_quality_key(format_info),
+        )
+
+    progressive_format = max(
+        progressive_formats,
+        key=progressive_quality_key,
+    )
+    return estimate_format_size(progressive_format, duration)
+
+
+def estimate_youtube_quality_sizes(metadata: dict):
+    return {
+        format_selector: estimate_youtube_quality_size(
+            metadata,
+            YOUTUBE_QUALITY_HEIGHTS[format_selector],
+            prefer_separate_streams=(
+                format_selector != YOUTUBE_480_FORMAT
+            ),
+        )
+        for format_selector in YOUTUBE_FORMATS
+    }
+
+
+def select_youtube_start_format(metadata: dict):
+    estimates = estimate_youtube_quality_sizes(metadata)
+    reliable_estimates = {
+        format_selector: size
+        for format_selector, size in estimates.items()
+        if size is not None
+    }
+
+    if not reliable_estimates:
+        return None
+
+    safe_size_bytes = MAX_MB * 1024 * 1024 * YOUTUBE_SIZE_SAFETY_RATIO
+
+    for format_selector in YOUTUBE_FORMATS:
+        estimated_size = estimates[format_selector]
+        if (
+            estimated_size is not None
+            and estimated_size <= safe_size_bytes
+        ):
+            return format_selector
+
+    for format_selector in YOUTUBE_FORMATS:
+        if estimates[format_selector] is None:
+            return format_selector
+
+    raise DownloadFileTooLargeError(
+        "Estimated YouTube formats are larger than max-filesize "
+        f"safety limit ({safe_size_bytes:.0f} bytes)."
+    )
+
+
+async def get_youtube_metadata(url: str, user_id: int):
+    duration_limit_error = ""
+
+    for command in build_youtube_metadata_commands(url):
+        try:
+            result = await run_command(
+                command,
+                user_id,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            return None
+
+        command_output = "\n".join(
+            output
+            for output in (result.stdout, result.stderr)
+            if output
+        )
+
+        if is_duration_limit_error(command_output):
+            duration_limit_error = error_tail(command_output, 1000)
+
+        if result.returncode != 0:
+            continue
+
+        metadata = parse_youtube_metadata(result.stdout)
+        if metadata is None:
+            continue
+
+        duration = positive_number(metadata.get("duration"))
+        if duration is not None and duration > MAX_DURATION_SECONDS:
+            raise DownloadDurationLimitError(
+                "YouTube video does not pass filter "
+                f"(duration <= {MAX_DURATION_SECONDS})."
+            )
+
+        return metadata
+
+    if duration_limit_error:
+        raise DownloadDurationLimitError(duration_limit_error)
+
+    return None
+
+
 def find_tiktok_photo_files(tmpdir):
     all_files = [
         path
@@ -239,11 +520,19 @@ async def make_tiktok_photo_video(
         output_path,
     ]
 
-    result = await run_command(
-        command,
-        user_id,
-        timeout=300,
-    )
+    postprocess_started_at = time.perf_counter()
+    try:
+        result = await run_command(
+            command,
+            user_id,
+            timeout=300,
+        )
+    finally:
+        log_performance(
+            "tiktok",
+            "postprocess",
+            postprocess_started_at,
+        )
 
     if result.returncode != 0:
         LOGGER.warning(
@@ -264,11 +553,19 @@ async def download_tiktok_photo(url, tmpdir, user_id):
         url,
     ]
 
-    result = await run_command(
-        command,
-        user_id,
-        timeout=180,
-    )
+    download_started_at = time.perf_counter()
+    try:
+        result = await run_command(
+            command,
+            user_id,
+            timeout=180,
+        )
+    finally:
+        log_performance(
+            "tiktok",
+            "download",
+            download_started_at,
+        )
 
     if result.returncode != 0:
         LOGGER.warning(
@@ -305,6 +602,12 @@ async def download_tiktok_photo(url, tmpdir, user_id):
         user_id,
     )
 
+    print(
+        "[PERF] platform=tiktok selected_format=photo+audio "
+        "vcodec=h264 acodec=aac",
+        flush=True,
+    )
+
     return output_path
 
 
@@ -320,40 +623,17 @@ def build_commands(platform: str, output_template: str, url: str):
             [
                 "yt-dlp",
                 *common_options,
-                "--extractor-args",
-                "youtube:player_client=default,-android_sdkless",
+                *player_client_options,
                 "-f",
-                "bv*[vcodec^=avc1][height<=480]+ba[acodec^=mp4a]/b[ext=mp4][height<=480]/b",
+                format_selector,
                 "--merge-output-format",
                 "mp4",
                 "-o",
                 output_template,
                 url,
-            ],
-            [
-                "yt-dlp",
-                *common_options,
-                "--extractor-args",
-                "youtube:player_client=android",
-                "-f",
-                "bv*[vcodec^=avc1][height<=480]+ba[acodec^=mp4a]/b[ext=mp4][height<=480]/b",
-                "--merge-output-format",
-                "mp4",
-                "-o",
-                output_template,
-                url,
-            ],
-            [
-                "yt-dlp",
-                *common_options,
-                "-f",
-                "b[ext=mp4][height<=480]/best[height<=480]/best",
-                "--merge-output-format",
-                "mp4",
-                "-o",
-                output_template,
-                url,
-            ],
+            ]
+            for format_selector in YOUTUBE_FORMATS
+            for player_client_options in YOUTUBE_PLAYER_CLIENT_FALLBACKS
         ]
 
     if platform == "tiktok":
@@ -499,20 +779,179 @@ def find_downloaded_file(tmpdir):
     return max(files, key=os.path.getsize)
 
 
-async def download_video(
+def get_format_selector(command) -> str:
+    try:
+        option_index = command.index("-f")
+        return command[option_index + 1]
+    except (ValueError, IndexError):
+        return ""
+
+
+def get_youtube_commands_from_format(commands, start_format):
+    if start_format is None:
+        return commands
+
+    start_index = YOUTUBE_FORMATS.index(start_format)
+    allowed_formats = set(YOUTUBE_FORMATS[start_index:])
+    return [
+        command
+        for command in commands
+        if get_format_selector(command) in allowed_formats
+    ]
+
+
+def cleanup_youtube_attempt_files(tmpdir: str):
+    for path in Path(tmpdir).rglob("*"):
+        if path.is_file() or path.is_symlink():
+            path.unlink(missing_ok=True)
+
+
+def get_downloaded_format_ids(command_output: str) -> str:
+    matches = re.findall(
+        r"Downloading(?:\s+\d+)?\s+format(?:\(s\)|s)?:\s*([^\r\n]+)",
+        command_output,
+        flags=re.IGNORECASE,
+    )
+    return matches[-1].strip() if matches else ""
+
+
+def get_actual_media_properties(
+    metadata: dict | None,
+    command_output: str,
+):
+    format_ids = get_downloaded_format_ids(command_output)
+    properties = {}
+
+    if format_ids:
+        properties["format_id"] = format_ids
+
+    if not metadata or not format_ids:
+        return properties
+
+    formats_by_id = {
+        str(format_info.get("format_id")): format_info
+        for format_info in metadata.get("formats") or []
+        if format_info.get("format_id") is not None
+    }
+    selected_formats = [
+        formats_by_id[format_id.strip()]
+        for format_id in format_ids.split("+")
+        if format_id.strip() in formats_by_id
+    ]
+
+    video_formats = [
+        format_info
+        for format_info in selected_formats
+        if str(format_info.get("vcodec", "none")) != "none"
+    ]
+    audio_formats = [
+        format_info
+        for format_info in selected_formats
+        if str(format_info.get("acodec", "none")) != "none"
+    ]
+
+    if video_formats:
+        video_format = max(video_formats, key=format_quality_key)
+        width = positive_number(video_format.get("width"))
+        height = positive_number(video_format.get("height"))
+        metadata_resolution = str(
+            video_format.get("resolution", "")
+        ).strip()
+        resolution_match = re.fullmatch(
+            r"(\d+)x(\d+)",
+            metadata_resolution,
+        )
+
+        if resolution_match is not None:
+            if width is None:
+                width = float(resolution_match.group(1))
+            if height is None:
+                height = float(resolution_match.group(2))
+
+        if width is not None:
+            properties["actual_width"] = int(width)
+        if height is not None:
+            properties["actual_height"] = int(height)
+        if width is not None and height is not None:
+            properties["actual_resolution"] = f"{int(width)}x{int(height)}"
+        elif metadata_resolution and metadata_resolution != "audio only":
+            properties["actual_resolution"] = metadata_resolution
+
+        video_codec = str(video_format.get("vcodec", ""))
+        if video_codec and video_codec != "none":
+            properties["vcodec"] = video_codec
+
+    if audio_formats:
+        audio_codec = str(audio_formats[-1].get("acodec", ""))
+        if audio_codec and audio_codec != "none":
+            properties["acodec"] = audio_codec
+
+    return properties
+
+
+def format_media_properties(properties: dict) -> str:
+    return " ".join(
+        f"{key}={value}"
+        for key, value in properties.items()
+    )
+
+
+def log_selected_format(
     platform: str,
-    url: str,
+    format_selector: str,
+    command_output: str = "",
+    metadata: dict | None = None,
+):
+    if not format_selector:
+        return
+
+    actual_properties = get_actual_media_properties(
+        metadata,
+        command_output,
+    )
+    actual_details = format_media_properties(actual_properties)
+
+    if platform == "youtube":
+        quality = YOUTUBE_QUALITY_HEIGHTS.get(format_selector)
+        details = (
+            f"[PERF] platform=youtube selected_quality={quality}p "
+            f"selected_format={format_selector}"
+        )
+        if actual_details:
+            details = f"{details} {actual_details}"
+        print(details, flush=True)
+        return
+
+    details = (
+        f"[PERF] platform={platform} selected_format={format_selector}"
+    )
+    if actual_details:
+        details = f"{details} {actual_details}"
+    print(details, flush=True)
+
+
+async def run_download_commands(
+    platform: str,
+    commands,
     tmpdir: str,
     user_id: int,
+    metadata: dict | None = None,
 ):
-    output_template = f"{tmpdir}/%(title).80s [%(id)s].%(ext)s"
-    commands = build_commands(platform, output_template, url)
-
     last_error = ""
     too_large_error = ""
     duration_limit_error = ""
+    oversized_youtube_format = ""
+    max_size_bytes = MAX_MB * 1024 * 1024
 
     for command in commands:
+        format_selector = get_format_selector(command)
+        if (
+            platform == "youtube"
+            and oversized_youtube_format
+            and format_selector == oversized_youtube_format
+        ):
+            continue
+
         result = await run_command(
             command,
             user_id,
@@ -535,7 +974,7 @@ async def download_video(
 
         if result.returncode == 0:
             try:
-                return find_downloaded_file(tmpdir)
+                downloaded_file = find_downloaded_file(tmpdir)
             except DownloadedFileNotFoundError:
                 if not duration_limited and not file_too_large:
                     last_error = (
@@ -544,6 +983,32 @@ async def download_video(
                     )
 
                 continue
+
+            if platform != "youtube":
+                log_selected_format(
+                    platform,
+                    format_selector,
+                    command_output,
+                )
+                return downloaded_file
+
+            file_size_bytes = os.path.getsize(downloaded_file)
+            if file_size_bytes <= max_size_bytes:
+                log_selected_format(
+                    platform,
+                    format_selector,
+                    command_output,
+                    metadata,
+                )
+                return downloaded_file
+
+            too_large_error = (
+                "Downloaded YouTube file is larger than max-filesize "
+                f"({file_size_bytes} bytes > {max_size_bytes} bytes)."
+            )
+            cleanup_youtube_attempt_files(tmpdir)
+            oversized_youtube_format = format_selector
+            continue
 
         last_error = (
             output_tail
@@ -563,3 +1028,48 @@ async def download_video(
         last_error,
     )
     raise DownloadFailedError(last_error)
+
+
+async def download_video(
+    platform: str,
+    url: str,
+    tmpdir: str,
+    user_id: int,
+):
+    output_template = f"{tmpdir}/%(title).80s [%(id)s].%(ext)s"
+    commands = build_commands(platform, output_template, url)
+    metadata = None
+
+    if platform == "youtube":
+        preflight_started_at = time.perf_counter()
+        try:
+            metadata = await get_youtube_metadata(url, user_id)
+        finally:
+            log_performance(
+                platform,
+                "preflight",
+                preflight_started_at,
+            )
+
+        if metadata is not None:
+            start_format = select_youtube_start_format(metadata)
+            commands = get_youtube_commands_from_format(
+                commands,
+                start_format,
+            )
+
+    download_started_at = time.perf_counter()
+    try:
+        return await run_download_commands(
+            platform,
+            commands,
+            tmpdir,
+            user_id,
+            metadata,
+        )
+    finally:
+        log_performance(
+            platform,
+            "download",
+            download_started_at,
+        )

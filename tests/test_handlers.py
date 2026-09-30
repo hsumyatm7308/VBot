@@ -10,6 +10,78 @@ from utils import DownloadDurationLimitError
 
 
 class HandleUrlSizeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_instagram_logs_file_size_and_upload_time(self):
+        user = SimpleNamespace(id=123, username="tester")
+        status_message = SimpleNamespace(edit_text=AsyncMock())
+        message = SimpleNamespace(
+            text="https://www.instagram.com/reel/test/",
+            reply_text=AsyncMock(return_value=status_message),
+            reply_video=AsyncMock(),
+        )
+        update = SimpleNamespace(effective_user=user, message=message)
+
+        with tempfile.TemporaryDirectory() as source_dir:
+            video_path = Path(source_dir, "instagram-video.mp4")
+            video_path.write_bytes(b"video")
+
+            with (
+                patch.object(handlers, "PUBLIC_ACCESS", True),
+                patch.object(
+                    handlers,
+                    "get_user_language",
+                    return_value="en",
+                ),
+                patch.object(
+                    handlers,
+                    "has_accepted_terms",
+                    return_value=True,
+                ),
+                patch.object(handlers, "get_daily_usage", return_value=0),
+                patch.object(handlers, "is_download_active", return_value=False),
+                patch.object(handlers, "is_http_url", return_value=True),
+                patch.object(handlers, "get_platform", return_value="instagram"),
+                patch.object(handlers, "begin_download"),
+                patch.object(handlers, "finish_download"),
+                patch.object(
+                    handlers,
+                    "download_video",
+                    AsyncMock(return_value=str(video_path)),
+                ),
+                patch.object(
+                    handlers,
+                    "keep_user_updated",
+                    AsyncMock(return_value=None),
+                ),
+                patch.object(handlers, "increment_daily_usage"),
+                patch.object(
+                    handlers,
+                    "get_remaining_downloads",
+                    return_value=handlers.DAILY_LIMIT - 1,
+                ),
+                patch.object(
+                    handlers.time,
+                    "perf_counter",
+                    side_effect=[10.0, 12.0, 14.0, 16.0],
+                ),
+                patch("builtins.print") as mock_print,
+            ):
+                await handlers.handle_url(update, Mock())
+
+        output = [call.args[0] for call in mock_print.call_args_list]
+        self.assertIn(
+            "[PERF] platform=instagram file_size=0.00MB",
+            output,
+        )
+        self.assertIn(
+            "[PERF] platform=instagram upload=2.00s",
+            output,
+        )
+        self.assertIn(
+            "[PERF] platform=instagram total=6.00s",
+            output,
+        )
+        message.reply_video.assert_awaited_once()
+
     async def test_duration_limit_uses_localized_message(self):
         user = SimpleNamespace(id=123, username="tester")
         status_message = SimpleNamespace(edit_text=AsyncMock())
@@ -83,7 +155,7 @@ class HandleUrlSizeTests(unittest.IsolatedAsyncioTestCase):
                 max_duration_minutes=minutes,
             ),
             "Video too long\n\n"
-            "This video exceeds the current 10-minute limit.",
+            "This video exceeds the current 15-minute limit.",
         )
         self.assertEqual(
             get_text(
@@ -92,7 +164,7 @@ class HandleUrlSizeTests(unittest.IsolatedAsyncioTestCase):
                 max_duration_minutes=minutes,
             ),
             "Video အချိန်ရှည်လွန်းပါတယ်\n\n"
-            "ဒီ video က လက်ရှိ 10 မိနစ် limit ထက် ကျော်နေပါတယ်။",
+            "ဒီ video က လက်ရှိ 15 မိနစ် limit ထက် ကျော်နေပါတယ်။",
         )
 
     async def test_downloaded_file_over_limit_uses_message_with_size(self):
