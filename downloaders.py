@@ -71,6 +71,13 @@ YOUTUBE_PLAYER_CLIENT_FALLBACKS = (
     (),
 )
 YOUTUBE_SIZE_SAFETY_RATIO = 0.9
+TIKTOK_VIDEO_FORMAT = (
+    "b[ext=mp4][vcodec^=h264]"
+    "/b[ext=mp4][vcodec^=avc1]"
+    "/b[ext=mp4]"
+    "/best"
+)
+TIKTOK_FORMAT_SORT = "res:1080,br"
 PINTEREST_FORMAT = "bv[vcodec^=avc1]+ba/b[ext=mp4]/best"
 PINTEREST_FORMAT_SORT = "res:1080,br"
 
@@ -780,7 +787,9 @@ def build_commands(platform: str, output_template: str, url: str):
                 "yt-dlp",
                 *common_options,
                 "-f",
-                "b[ext=mp4][height<=720]/best[height<=720]/best",
+                TIKTOK_VIDEO_FORMAT,
+                "-S",
+                TIKTOK_FORMAT_SORT,
                 "--merge-output-format",
                 "mp4",
                 "-o",
@@ -793,7 +802,9 @@ def build_commands(platform: str, output_template: str, url: str):
                 "--extractor-args",
                 "tiktok:api_hostname=api-h2.tiktokv.com",
                 "-f",
-                "b[ext=mp4][height<=720]/best[height<=720]/best",
+                TIKTOK_VIDEO_FORMAT,
+                "-S",
+                TIKTOK_FORMAT_SORT,
                 "--merge-output-format",
                 "mp4",
                 "-o",
@@ -806,7 +817,9 @@ def build_commands(platform: str, output_template: str, url: str):
                 "--extractor-args",
                 "tiktok:api_hostname=api22-normal-c-useast2a.tiktokv.com",
                 "-f",
-                "b[ext=mp4][height<=720]/best[height<=720]/best",
+                TIKTOK_VIDEO_FORMAT,
+                "-S",
+                TIKTOK_FORMAT_SORT,
                 "--merge-output-format",
                 "mp4",
                 "-o",

@@ -1084,6 +1084,118 @@ class DownloadConfigurationTests(unittest.TestCase):
         self.assertIn("--merge-output-format", command)
         self.assertNotIn("--recode-video", command)
 
+    def test_tiktok_portrait_h264_is_not_height_filtered(self):
+        commands = downloaders.build_commands(
+            "tiktok",
+            "/tmp/%(title)s.%(ext)s",
+            "https://www.tiktok.com/@creator/video/123",
+        )
+
+        self.assertEqual(len(commands), 3)
+        for command in commands:
+            selector = downloaders.get_format_selector(command)
+            self.assertEqual(selector, downloaders.TIKTOK_VIDEO_FORMAT)
+            self.assertNotIn("height<=720", selector)
+            self.assertNotIn("height<=1080", selector)
+            sort_index = command.index("-S")
+            self.assertEqual(
+                command[sort_index + 1],
+                downloaders.TIKTOK_FORMAT_SORT,
+            )
+
+    def test_tiktok_landscape_h264_metadata_remains_visible_in_perf(self):
+        metadata = {
+            "formats": [
+                {
+                    "format_id": "h264-landscape",
+                    "width": 1024,
+                    "height": 576,
+                    "vcodec": "h264",
+                    "acodec": "mp4a.40.2",
+                },
+            ],
+        }
+
+        with patch("builtins.print") as mock_print:
+            downloaders.log_selected_format(
+                "tiktok",
+                downloaders.TIKTOK_VIDEO_FORMAT,
+                "[info] video: Downloading 1 format(s): h264-landscape",
+                metadata,
+            )
+
+        output = mock_print.call_args.args[0]
+        self.assertIn("platform=tiktok", output)
+        self.assertIn("actual_resolution=1024x576", output)
+        self.assertIn("format_id=h264-landscape", output)
+        self.assertIn("vcodec=h264", output)
+        self.assertIn("acodec=mp4a.40.2", output)
+
+    def test_tiktok_prefers_h264_before_higher_resolution_h265(self):
+        selector_branches = downloaders.TIKTOK_VIDEO_FORMAT.split("/")
+
+        self.assertEqual(
+            selector_branches[:2],
+            [
+                "b[ext=mp4][vcodec^=h264]",
+                "b[ext=mp4][vcodec^=avc1]",
+            ],
+        )
+        self.assertNotIn("hevc", selector_branches[0])
+        self.assertNotIn("h265", selector_branches[0])
+
+    def test_tiktok_falls_back_when_h264_is_unavailable(self):
+        selector_branches = downloaders.TIKTOK_VIDEO_FORMAT.split("/")
+
+        self.assertEqual(
+            selector_branches[2:],
+            ["b[ext=mp4]", "best"],
+        )
+        self.assertEqual(downloaders.TIKTOK_FORMAT_SORT, "res:1080,br")
+
+    def test_other_platform_video_selectors_are_unchanged(self):
+        expected_selectors = {
+            "twitter": [
+                "b[ext=mp4][height<=480]/best[height<=480]/best",
+            ] * 3,
+            "instagram": [
+                "b[ext=mp4][height<=720]/b[ext=mp4]/best",
+                "best",
+            ],
+            "pinterest": [
+                "bv[vcodec^=avc1]+ba/b[ext=mp4]/best",
+            ],
+        }
+
+        for platform, expected in expected_selectors.items():
+            commands = downloaders.build_commands(
+                platform,
+                "/tmp/%(title)s.%(ext)s",
+                "https://example.com/video",
+            )
+            selectors = [
+                downloaders.get_format_selector(command)
+                for command in commands
+            ]
+            self.assertEqual(selectors, expected)
+
+        youtube_commands = downloaders.build_commands(
+            "youtube",
+            "/tmp/%(title)s.%(ext)s",
+            "https://example.com/video",
+        )
+        self.assertEqual(
+            [
+                downloaders.get_format_selector(command)
+                for command in youtube_commands
+            ],
+            [
+                format_selector
+                for format_selector in downloaders.YOUTUBE_FORMATS
+                for _ in downloaders.YOUTUBE_PLAYER_CLIENT_FALLBACKS
+            ],
+        )
+
     def test_youtube_metadata_commands_do_not_download_media(self):
         commands = downloaders.build_youtube_metadata_commands(
             "https://example.com/video"
