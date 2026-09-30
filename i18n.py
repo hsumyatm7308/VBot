@@ -5,7 +5,10 @@ SUPPORTED_LANGUAGES = {"en", "my"}
 TEXTS = {
     "en": {
         "language_prompt": "Choose language\nဘာသာစကားရွေးပါ",
-        "home": "VDlp\n\nPaste a link\n\nYouTube • TikTok • X",
+        "home": (
+            "VDlp\n\nPaste a link\n\n"
+            "YouTube • TikTok • X • Instagram • Pinterest"
+        ),
         "help": (
             "How to use\n\n"
             "1. Copy a supported link\n"
@@ -16,7 +19,8 @@ TEXTS = {
             "YouTube\n"
             "TikTok\n"
             "X\n"
-            "Instagram\n\n"
+            "Instagram\n"
+            "Pinterest\n\n"
             "Daily limit: {daily_limit}"
         ),
         "status": (
@@ -34,7 +38,8 @@ TEXTS = {
             "3. Public availability does not mean that a video is "
             "copyright-free.\n\n"
             "4. You are responsible for following applicable laws and the "
-            "Terms of Service of YouTube, TikTok, and X/Twitter.\n\n"
+            "Terms of Service of YouTube, TikTok, X/Twitter, Instagram, "
+            "and Pinterest.\n\n"
             "5. VDlp uses temporary files during processing and is designed to "
             "remove them when processing ends.\n\n"
             "6. Access may be restricted or removed for abuse, copyright "
@@ -101,6 +106,17 @@ TEXTS = {
             "Download failed\n\n"
             "The source could not be reached. Try again later."
         ),
+        "instagram_carousel_not_supported": (
+            "Instagram carousel not supported yet."
+        ),
+        "instagram_rate_limited": (
+            "Instagram is temporarily rate limiting downloads.\n\n"
+            "Please try again later."
+        ),
+        "pinterest_video_only": (
+            "Unsupported Pinterest media\n\n"
+            "Only public Pinterest video Pins are supported."
+        ),
         "download_timeout": (
             "Download timed out\n\n"
             "Try again later."
@@ -121,7 +137,10 @@ TEXTS = {
     },
     "my": {
         "language_prompt": "Choose language\nဘာသာစကားရွေးပါ",
-        "home": "VDlp\n\nLink တစ်ခု ပို့ပါ\n\nYouTube • TikTok • X",
+        "home": (
+            "VDlp\n\nLink တစ်ခု ပို့ပါ\n\n"
+            "YouTube • TikTok • X • Instagram • Pinterest"
+        ),
         "help": (
             "အသုံးပြုနည်း\n\n"
             "1. Support လုပ်ထားသော link ကို copy လုပ်ပါ\n"
@@ -132,7 +151,8 @@ TEXTS = {
             "YouTube\n"
             "TikTok\n"
             "X\n"
-            "Instagram\n\n"
+            "Instagram\n"
+            "Pinterest\n\n"
             "တစ်ရက်ကန့်သတ်ချက်: {daily_limit}"
         ),
         "status": (
@@ -151,7 +171,8 @@ TEXTS = {
             "ကို ကျော်ဖြတ်ရန် VDlp ကို မသုံးရပါ။\n\n"
             "3. Video တစ်ခု public ဖြစ်နေခြင်းသည် copyright-free ဖြစ်သည်ဟု "
             "မဆိုလိုပါ။\n\n"
-            "4. YouTube၊ TikTok၊ X/Twitter တို့၏ Terms of Service နှင့် "
+            "4. YouTube၊ TikTok၊ X/Twitter၊ Instagram၊ Pinterest တို့၏ "
+            "Terms of Service နှင့် "
             "သက်ဆိုင်ရာဥပဒေများကို လိုက်နာရန် အသုံးပြုသူတွင် တာဝန်ရှိပါသည်။\n\n"
             "5. VDlp သည် လုပ်ငန်းစဉ်အတွင်း temporary files အသုံးပြုပြီး "
             "ပြီးဆုံးချိန်တွင် ဖယ်ရှားရန် ဒီဇိုင်းလုပ်ထားပါသည်။\n\n"
@@ -220,6 +241,17 @@ TEXTS = {
         "download_failed": (
             "Download မအောင်မြင်ပါ\n\n"
             "မူရင်း source ကို ဆက်သွယ်၍မရပါ။ နောက်မှပြန်စမ်းပါ။"
+        ),
+        "instagram_carousel_not_supported": (
+            "Instagram carousel ကို လက်ရှိ မထောက်ပံ့သေးပါ။"
+        ),
+        "instagram_rate_limited": (
+            "Instagram က download များကို ယာယီကန့်သတ်ထားပါတယ်။\n\n"
+            "ခဏနောက်မှ ပြန်စမ်းပါ။"
+        ),
+        "pinterest_video_only": (
+            "Pinterest media ကို မထောက်ပံ့ပါ\n\n"
+            "Public Pinterest video Pin များကိုသာ support လုပ်ထားပါတယ်။"
         ),
         "download_timeout": (
             "Download အချိန်ကျော်သွားပါပြီ\n\n"

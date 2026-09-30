@@ -21,6 +21,9 @@ from utils import (
     DownloadedFileNotFoundError,
     DownloadCancelledError,
     DownloadFailedError,
+    InstagramCarouselNotSupportedError,
+    InstagramRateLimitError,
+    PinterestUnsupportedMediaError,
     error_tail,
 )
 
@@ -68,6 +71,8 @@ YOUTUBE_PLAYER_CLIENT_FALLBACKS = (
     (),
 )
 YOUTUBE_SIZE_SAFETY_RATIO = 0.9
+PINTEREST_FORMAT = "bv[vcodec^=avc1]+ba/b[ext=mp4]/best"
+PINTEREST_FORMAT_SORT = "res:1080,br"
 
 
 def log_performance(platform: str, stage: str, started_at: float):
@@ -104,11 +109,25 @@ def is_file_too_large_error(error_text: str) -> bool:
 def is_duration_limit_error(error_text: str) -> bool:
     normalized_error = " ".join(error_text.lower().split())
     duration_filter = re.compile(
-        rf"\bduration\s*<=\s*{MAX_DURATION_SECONDS}\b"
+        rf"\bduration\s*<=\s*\??\s*{MAX_DURATION_SECONDS}\b"
     )
     return (
         "does not pass filter" in normalized_error
         and duration_filter.search(normalized_error) is not None
+    )
+
+
+def is_pinterest_unsupported_media_error(error_text: str) -> bool:
+    normalized_error = " ".join(error_text.lower().split())
+    unsupported_media_markers = (
+        "no video formats found",
+        "does not contain a video",
+        "no video could be found",
+        "not a video pin",
+    )
+    return any(
+        marker in normalized_error
+        for marker in unsupported_media_markers
     )
 
 
@@ -229,6 +248,7 @@ async def run_command(command, user_id: int, timeout: int):
             ACTIVE_PROCESSES.pop(user_id, None)
 
     raise_if_cancelled(user_id)
+
 
     return subprocess.CompletedProcess(
         command,
@@ -611,11 +631,129 @@ async def download_tiktok_photo(url, tmpdir, user_id):
     return output_path
 
 
+async def download_instagram_photo(url, tmpdir, user_id):
+    gallery_dir = os.path.join(tmpdir, "instagram_photo")
+    os.makedirs(gallery_dir, exist_ok=True)
+
+    proxy_args = (
+        ["--proxy", INSTAGRAM_PROXY]
+        if INSTAGRAM_PROXY
+        else []
+    )
+    command = [
+        "gallery-dl",
+        *proxy_args,
+        "--http-timeout", "30",
+        "-R", "0",
+        "-D", gallery_dir,
+        url,
+    ]
+
+    download_started_at = time.perf_counter()
+
+    try:
+        result = await run_command(
+            command,
+            user_id,
+            timeout=180,
+        )
+    finally:
+        log_performance(
+            "instagram",
+            "photo_download",
+            download_started_at,
+        )
+
+    command_output = "\n".join(
+        output
+        for output in (result.stdout, result.stderr)
+        if output
+    )
+    normalized_output = " ".join(
+        command_output.lower().replace(":", " ").split()
+    )
+
+    if "429 too many requests" in normalized_output:
+        LOGGER.warning(
+            "Instagram gallery-dl rate limited for user %s (HTTP 429)",
+            user_id,
+        )
+        raise InstagramRateLimitError(
+            "Instagram photo download rate limited."
+        )
+
+    if result.returncode != 0:
+        LOGGER.warning(
+            "Instagram gallery-dl failed for user %s: %s",
+            user_id,
+            error_tail(result.stderr, 800),
+        )
+
+        raise DownloadFailedError(
+            "Instagram photo download failed."
+        )
+
+    all_files = [
+        path
+        for path in glob.glob(
+            f"{gallery_dir}/**/*",
+            recursive=True,
+        )
+        if os.path.isfile(path)
+    ]
+
+    image_exts = {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp",
+    }
+    media_exts = image_exts | {
+        ".m4v",
+        ".mov",
+        ".mp4",
+        ".webm",
+    }
+
+    images = [
+        path
+        for path in all_files
+        if Path(path).suffix.lower() in image_exts
+    ]
+    media_files = [
+        path
+        for path in all_files
+        if Path(path).suffix.lower() in media_exts
+    ]
+
+    if len(media_files) > 1:
+        raise InstagramCarouselNotSupportedError(
+            "Instagram carousel is not supported yet."
+        )
+
+    if not images:
+        raise DownloadFailedError(
+            "Instagram photo not found."
+        )
+
+    print(
+        "[PERF] platform=instagram selected_format=single_photo",
+        flush=True,
+    )
+
+    return images[0]
+
+
 def build_commands(platform: str, output_template: str, url: str):
+    duration_filter = (
+        f"duration <=? {MAX_DURATION_SECONDS}"
+        if platform in {"instagram", "pinterest"}
+        else f"duration <= {MAX_DURATION_SECONDS}"
+    )
     common_options = [
         "--no-playlist",
         "--max-filesize", f"{MAX_MB}M",
-        "--match-filter", f"duration <= {MAX_DURATION_SECONDS}",
+        "--match-filter", duration_filter,
     ]
 
     if platform == "youtube":
@@ -763,6 +901,19 @@ def build_commands(platform: str, output_template: str, url: str):
                 "mp4",
                 "-o",
                 output_template,
+                url,
+            ],
+        ]
+
+    if platform == "pinterest":
+        return [
+            [
+                "yt-dlp",
+                *common_options,
+                "-f", PINTEREST_FORMAT,
+                "-S", PINTEREST_FORMAT_SORT,
+                "--merge-output-format", "mp4",
+                "-o", output_template,
                 url,
             ],
         ]
@@ -940,6 +1091,7 @@ async def run_download_commands(
     last_error = ""
     too_large_error = ""
     duration_limit_error = ""
+    unsupported_media_error = ""
     oversized_youtube_format = ""
     max_size_bytes = MAX_MB * 1024 * 1024
 
@@ -965,6 +1117,10 @@ async def run_download_commands(
         output_tail = error_tail(command_output, 1000)
         duration_limited = is_duration_limit_error(command_output)
         file_too_large = is_file_too_large_error(command_output)
+        unsupported_media = (
+            platform == "pinterest"
+            and is_pinterest_unsupported_media_error(command_output)
+        )
 
         if duration_limited:
             duration_limit_error = output_tail
@@ -972,11 +1128,18 @@ async def run_download_commands(
         if file_too_large:
             too_large_error = output_tail
 
+        if unsupported_media:
+            unsupported_media_error = output_tail
+
         if result.returncode == 0:
             try:
                 downloaded_file = find_downloaded_file(tmpdir)
             except DownloadedFileNotFoundError:
-                if not duration_limited and not file_too_large:
+                if (
+                    not duration_limited
+                    and not file_too_large
+                    and not unsupported_media
+                ):
                     last_error = (
                         output_tail
                         or "yt-dlp completed without creating a file."
@@ -1020,6 +1183,11 @@ async def run_download_commands(
 
     if too_large_error:
         raise DownloadFileTooLargeError(too_large_error)
+
+    if unsupported_media_error:
+        raise PinterestUnsupportedMediaError(
+            "Pinterest Pin does not contain supported video media."
+        )
 
     LOGGER.warning(
         "All yt-dlp attempts failed for user %s on %s: %s",

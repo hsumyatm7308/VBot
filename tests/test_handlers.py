@@ -6,10 +6,295 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import handlers
 from i18n import get_text
-from utils import DownloadDurationLimitError
+from utils import (
+    DownloadDurationLimitError,
+    DownloadFailedError,
+    InstagramCarouselNotSupportedError,
+    InstagramRateLimitError,
+    PinterestUnsupportedMediaError,
+)
 
 
 class HandleUrlSizeTests(unittest.IsolatedAsyncioTestCase):
+    async def run_pinterest_handler(self, video_download):
+        user = SimpleNamespace(id=123, username="tester")
+        status_message = SimpleNamespace(edit_text=AsyncMock())
+        message = SimpleNamespace(
+            text="https://pin.it/AbCd123",
+            reply_text=AsyncMock(return_value=status_message),
+            reply_video=AsyncMock(),
+        )
+        update = SimpleNamespace(effective_user=user, message=message)
+        increment_usage = Mock()
+
+        with (
+            patch.object(handlers, "PUBLIC_ACCESS", True),
+            patch.object(
+                handlers,
+                "get_user_language",
+                return_value="en",
+            ),
+            patch.object(
+                handlers,
+                "has_accepted_terms",
+                return_value=True,
+            ),
+            patch.object(handlers, "get_daily_usage", return_value=0),
+            patch.object(handlers, "is_download_active", return_value=False),
+            patch.object(handlers, "is_http_url", return_value=True),
+            patch.object(handlers, "get_platform", return_value="pinterest"),
+            patch.object(handlers, "begin_download"),
+            patch.object(handlers, "finish_download"),
+            patch.object(handlers, "download_video", video_download),
+            patch.object(
+                handlers,
+                "keep_user_updated",
+                AsyncMock(return_value=None),
+            ),
+            patch.object(
+                handlers,
+                "increment_daily_usage",
+                increment_usage,
+            ),
+            patch.object(
+                handlers,
+                "get_remaining_downloads",
+                return_value=handlers.DAILY_LIMIT - 1,
+            ),
+            patch.object(
+                handlers.time,
+                "perf_counter",
+                side_effect=[10.0, 12.0, 14.0, 16.0],
+            ),
+            patch("builtins.print") as mock_print,
+        ):
+            await handlers.handle_url(update, Mock())
+
+        return message, status_message, increment_usage, mock_print
+
+    async def run_instagram_post_handler(
+        self,
+        video_download,
+        photo_download,
+        reply_document=None,
+        url="https://www.instagram.com/p/test/",
+    ):
+        user = SimpleNamespace(id=123, username="tester")
+        status_message = SimpleNamespace(edit_text=AsyncMock())
+        message = SimpleNamespace(
+            text=url,
+            reply_text=AsyncMock(return_value=status_message),
+            reply_video=AsyncMock(),
+            reply_document=reply_document or AsyncMock(),
+        )
+        update = SimpleNamespace(effective_user=user, message=message)
+        increment_usage = Mock()
+
+        with (
+            patch.object(handlers, "PUBLIC_ACCESS", True),
+            patch.object(
+                handlers,
+                "get_user_language",
+                return_value="en",
+            ),
+            patch.object(
+                handlers,
+                "has_accepted_terms",
+                return_value=True,
+            ),
+            patch.object(handlers, "get_daily_usage", return_value=0),
+            patch.object(handlers, "is_download_active", return_value=False),
+            patch.object(handlers, "is_http_url", return_value=True),
+            patch.object(handlers, "get_platform", return_value="instagram"),
+            patch.object(handlers, "begin_download"),
+            patch.object(handlers, "finish_download"),
+            patch.object(handlers, "download_video", video_download),
+            patch.object(
+                handlers,
+                "download_instagram_photo",
+                photo_download,
+            ),
+            patch.object(
+                handlers,
+                "keep_user_updated",
+                AsyncMock(return_value=None),
+            ),
+            patch.object(
+                handlers,
+                "increment_daily_usage",
+                increment_usage,
+            ),
+            patch.object(
+                handlers,
+                "get_remaining_downloads",
+                return_value=handlers.DAILY_LIMIT - 1,
+            ),
+            patch("builtins.print"),
+        ):
+            await handlers.handle_url(update, Mock())
+
+        return message, status_message, increment_usage
+
+    async def test_instagram_post_keeps_successful_video_flow(self):
+        with tempfile.TemporaryDirectory() as source_dir:
+            video_path = Path(source_dir, "instagram-video.mp4")
+            video_path.write_bytes(b"video")
+            video_download = AsyncMock(return_value=str(video_path))
+            photo_download = AsyncMock()
+
+            message, _, increment_usage = (
+                await self.run_instagram_post_handler(
+                    video_download,
+                    photo_download,
+                )
+            )
+
+        video_download.assert_awaited_once()
+        photo_download.assert_not_awaited()
+        message.reply_video.assert_awaited_once()
+        message.reply_document.assert_not_awaited()
+        increment_usage.assert_called_once_with(123)
+
+    async def test_instagram_reel_failure_does_not_use_photo_fallback(self):
+        video_download = AsyncMock(
+            side_effect=DownloadFailedError("video unavailable")
+        )
+        photo_download = AsyncMock()
+
+        message, status_message, increment_usage = (
+            await self.run_instagram_post_handler(
+                video_download,
+                photo_download,
+                url="https://www.instagram.com/reel/test/",
+            )
+        )
+
+        video_download.assert_awaited_once()
+        photo_download.assert_not_awaited()
+        edited_messages = [
+            call.args[0]
+            for call in status_message.edit_text.await_args_list
+        ]
+        self.assertIn(get_text("en", "download_failed"), edited_messages)
+        message.reply_video.assert_not_awaited()
+        message.reply_document.assert_not_awaited()
+        increment_usage.assert_not_called()
+
+    async def test_instagram_post_falls_back_to_document_photo(self):
+        with tempfile.TemporaryDirectory() as source_dir:
+            photo_path = Path(source_dir, "instagram-photo.jpg")
+            photo_path.write_bytes(b"photo")
+            video_download = AsyncMock(
+                side_effect=DownloadFailedError("video unavailable")
+            )
+            photo_download = AsyncMock(return_value=str(photo_path))
+
+            message, _, increment_usage = (
+                await self.run_instagram_post_handler(
+                    video_download,
+                    photo_download,
+                )
+            )
+
+        video_download.assert_awaited_once()
+        photo_download.assert_awaited_once()
+        message.reply_video.assert_not_awaited()
+        message.reply_document.assert_awaited_once()
+        upload_options = message.reply_document.await_args.kwargs
+        self.assertEqual(upload_options["read_timeout"], 120)
+        self.assertEqual(upload_options["write_timeout"], 120)
+        self.assertEqual(upload_options["connect_timeout"], 30)
+        self.assertEqual(upload_options["pool_timeout"], 30)
+        increment_usage.assert_called_once_with(123)
+
+    async def test_instagram_photo_upload_failure_does_not_increment_usage(self):
+        with tempfile.TemporaryDirectory() as source_dir:
+            photo_path = Path(source_dir, "instagram-photo.jpg")
+            photo_path.write_bytes(b"photo")
+            reply_document = AsyncMock(
+                side_effect=RuntimeError("upload failed")
+            )
+
+            with patch.object(handlers.LOGGER, "exception"):
+                message, _, increment_usage = (
+                    await self.run_instagram_post_handler(
+                        AsyncMock(
+                            side_effect=DownloadFailedError(
+                                "video unavailable"
+                            )
+                        ),
+                        AsyncMock(return_value=str(photo_path)),
+                        reply_document=reply_document,
+                    )
+                )
+
+        message.reply_document.assert_awaited_once()
+        increment_usage.assert_not_called()
+
+    async def test_instagram_carousel_shows_clear_error(self):
+        message, status_message, increment_usage = (
+            await self.run_instagram_post_handler(
+                AsyncMock(
+                    side_effect=DownloadFailedError("video unavailable")
+                ),
+                AsyncMock(
+                    side_effect=InstagramCarouselNotSupportedError(
+                        "Instagram carousel is not supported yet."
+                    )
+                ),
+            )
+        )
+
+        edited_messages = [
+            call.args[0]
+            for call in status_message.edit_text.await_args_list
+        ]
+        self.assertIn(
+            get_text("en", "instagram_carousel_not_supported"),
+            edited_messages,
+        )
+        message.reply_video.assert_not_awaited()
+        message.reply_document.assert_not_awaited()
+        increment_usage.assert_not_called()
+
+    async def test_instagram_rate_limit_shows_localized_error(self):
+        message, status_message, increment_usage = (
+            await self.run_instagram_post_handler(
+                AsyncMock(
+                    side_effect=DownloadFailedError("video unavailable")
+                ),
+                AsyncMock(
+                    side_effect=InstagramRateLimitError(
+                        "Instagram photo download rate limited."
+                    )
+                ),
+            )
+        )
+
+        edited_messages = [
+            call.args[0]
+            for call in status_message.edit_text.await_args_list
+        ]
+        self.assertIn(
+            get_text("en", "instagram_rate_limited"),
+            edited_messages,
+        )
+        message.reply_video.assert_not_awaited()
+        message.reply_document.assert_not_awaited()
+        increment_usage.assert_not_called()
+
+    def test_instagram_rate_limit_messages_are_localized(self):
+        self.assertEqual(
+            get_text("en", "instagram_rate_limited"),
+            "Instagram is temporarily rate limiting downloads.\n\n"
+            "Please try again later.",
+        )
+        self.assertEqual(
+            get_text("my", "instagram_rate_limited"),
+            "Instagram က download များကို ယာယီကန့်သတ်ထားပါတယ်။\n\n"
+            "ခဏနောက်မှ ပြန်စမ်းပါ။",
+        )
+
     async def test_instagram_logs_file_size_and_upload_time(self):
         user = SimpleNamespace(id=123, username="tester")
         status_message = SimpleNamespace(edit_text=AsyncMock())
@@ -81,6 +366,67 @@ class HandleUrlSizeTests(unittest.IsolatedAsyncioTestCase):
             output,
         )
         message.reply_video.assert_awaited_once()
+
+    async def test_pinterest_video_uses_generic_upload_and_perf_flow(self):
+        with tempfile.TemporaryDirectory() as source_dir:
+            video_path = Path(source_dir, "pinterest-video.mp4")
+            video_path.write_bytes(b"video")
+
+            message, _, increment_usage, mock_print = (
+                await self.run_pinterest_handler(
+                    AsyncMock(return_value=str(video_path))
+                )
+            )
+
+        output = [call.args[0] for call in mock_print.call_args_list]
+        self.assertIn(
+            "[PERF] platform=pinterest file_size=0.00MB",
+            output,
+        )
+        self.assertIn(
+            "[PERF] platform=pinterest upload=2.00s",
+            output,
+        )
+        self.assertIn(
+            "[PERF] platform=pinterest total=6.00s",
+            output,
+        )
+        message.reply_video.assert_awaited_once()
+        increment_usage.assert_called_once_with(123)
+
+    async def test_pinterest_image_pin_shows_controlled_message(self):
+        message, status_message, increment_usage, _ = (
+            await self.run_pinterest_handler(
+                AsyncMock(
+                    side_effect=PinterestUnsupportedMediaError(
+                        "Pinterest Pin does not contain supported video media."
+                    )
+                )
+            )
+        )
+
+        edited_messages = [
+            call.args[0]
+            for call in status_message.edit_text.await_args_list
+        ]
+        self.assertIn(
+            get_text("en", "pinterest_video_only"),
+            edited_messages,
+        )
+        message.reply_video.assert_not_awaited()
+        increment_usage.assert_not_called()
+
+    def test_pinterest_unsupported_messages_are_localized(self):
+        self.assertEqual(
+            get_text("en", "pinterest_video_only"),
+            "Unsupported Pinterest media\n\n"
+            "Only public Pinterest video Pins are supported.",
+        )
+        self.assertEqual(
+            get_text("my", "pinterest_video_only"),
+            "Pinterest media ကို မထောက်ပံ့ပါ\n\n"
+            "Public Pinterest video Pin များကိုသာ support လုပ်ထားပါတယ်။",
+        )
 
     async def test_duration_limit_uses_localized_message(self):
         user = SimpleNamespace(id=123, username="tester")

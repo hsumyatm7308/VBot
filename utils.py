@@ -10,6 +10,18 @@ class DownloadFailedError(RuntimeError):
         self.last_error = last_error
 
 
+class InstagramCarouselNotSupportedError(DownloadFailedError):
+    pass
+
+
+class InstagramRateLimitError(DownloadFailedError):
+    pass
+
+
+class PinterestUnsupportedMediaError(DownloadFailedError):
+    pass
+
+
 class DownloadFileTooLargeError(RuntimeError):
     def __init__(self, last_error: str):
         super().__init__(last_error)

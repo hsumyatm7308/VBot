@@ -30,6 +30,7 @@ from database import (
 from downloaders import (
     begin_download,
     cancel_download,
+    download_instagram_photo,
     download_tiktok_photo,
     download_video,
     finish_download,
@@ -41,6 +42,7 @@ from i18n import DEFAULT_LANGUAGE, get_text
 from platforms import (
     get_platform,
     is_http_url,
+    is_instagram_post_url,
     is_tiktok_photo_url,
     resolve_tiktok_url,
 )
@@ -50,6 +52,9 @@ from utils import (
     DownloadFileTooLargeError,
     DownloadedFileNotFoundError,
     DownloadFailedError,
+    InstagramCarouselNotSupportedError,
+    InstagramRateLimitError,
+    PinterestUnsupportedMediaError,
     get_file_size_mb,
     keep_user_updated,
 )
@@ -779,6 +784,10 @@ async def handle_url(
         platform == "tiktok"
         and is_tiktok_photo_url(url)
     )
+    is_instagram_post = (
+        platform == "instagram"
+        and is_instagram_post_url(url)
+    )
 
     begin_download(user_id)
     current_task = asyncio.current_task()
@@ -812,23 +821,40 @@ async def handle_url(
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            media_kind = "video"
+
             if is_tiktok_photo:
                 await status_message.edit_text(
                     get_text(language, "preparing_media"),
                     reply_markup=cancel_keyboard,
                 )
-                video_path = await download_tiktok_photo(
+                media_path = await download_tiktok_photo(
                     url,
                     tmpdir,
                     user_id,
                 )
             else:
-                video_path = await download_video(
-                    platform,
-                    url,
-                    tmpdir,
-                    user_id,
-                )
+                try:
+                    media_path = await download_video(
+                        platform,
+                        url,
+                        tmpdir,
+                        user_id,
+                    )
+                except DownloadFailedError:
+                    if not is_instagram_post:
+                        raise
+
+                    await status_message.edit_text(
+                        get_text(language, "preparing_media"),
+                        reply_markup=cancel_keyboard,
+                    )
+                    media_path = await download_instagram_photo(
+                        url,
+                        tmpdir,
+                        user_id,
+                    )
+                    media_kind = "photo"
 
             raise_if_cancelled(user_id)
 
@@ -844,7 +870,7 @@ async def handle_url(
                 status_task = None
 
             raise_if_cancelled(user_id)
-            size_mb = get_file_size_mb(video_path)
+            size_mb = get_file_size_mb(media_path)
             print(
                 f"[PERF] platform={platform} file_size={size_mb:.2f}MB",
                 flush=True,
@@ -869,16 +895,25 @@ async def handle_url(
 
             upload_started_at = time.perf_counter()
             try:
-                with open(video_path, "rb") as video:
-                    await update.message.reply_video(
-                        video=video,
-                        caption=Path(video_path).name,
-                        supports_streaming=True,
-                        read_timeout=120,
-                        write_timeout=120,
-                        connect_timeout=30,
-                        pool_timeout=30,
-                    )
+                with open(media_path, "rb") as media:
+                    upload_options = {
+                        "caption": Path(media_path).name,
+                        "read_timeout": 120,
+                        "write_timeout": 120,
+                        "connect_timeout": 30,
+                        "pool_timeout": 30,
+                    }
+                    if media_kind == "photo":
+                        await update.message.reply_document(
+                            document=media,
+                            **upload_options,
+                        )
+                    else:
+                        await update.message.reply_video(
+                            video=media,
+                            supports_streaming=True,
+                            **upload_options,
+                        )
             finally:
                 log_performance(
                     platform,
@@ -927,6 +962,27 @@ async def handle_url(
         await safe_edit_status_message(
             status_message,
             get_text(language, "file_too_large"),
+            reply_markup=get_home_keyboard(language),
+        )
+
+    except InstagramCarouselNotSupportedError:
+        await safe_edit_status_message(
+            status_message,
+            get_text(language, "instagram_carousel_not_supported"),
+            reply_markup=get_home_keyboard(language),
+        )
+
+    except InstagramRateLimitError:
+        await safe_edit_status_message(
+            status_message,
+            get_text(language, "instagram_rate_limited"),
+            reply_markup=get_home_keyboard(language),
+        )
+
+    except PinterestUnsupportedMediaError:
+        await safe_edit_status_message(
+            status_message,
+            get_text(language, "pinterest_video_only"),
             reply_markup=get_home_keyboard(language),
         )
 

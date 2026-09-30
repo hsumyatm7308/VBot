@@ -12,6 +12,9 @@ from utils import (
     DownloadDurationLimitError,
     DownloadFailedError,
     DownloadFileTooLargeError,
+    InstagramCarouselNotSupportedError,
+    InstagramRateLimitError,
+    PinterestUnsupportedMediaError,
 )
 
 
@@ -659,6 +662,305 @@ class DownloadVideoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run_command.await_count, 3)
 
 
+class InstagramPhotoDownloadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_single_photo_download_uses_configured_proxy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(
+                temp_dir,
+                "instagram_photo",
+                "photo.jpg",
+            )
+
+            async def run_command_side_effect(command, user_id, timeout):
+                image_path.write_bytes(b"photo")
+                return command_result(0, stdout="download complete")
+
+            run_command = AsyncMock(side_effect=run_command_side_effect)
+            with (
+                patch.object(
+                    downloaders,
+                    "INSTAGRAM_PROXY",
+                    "http://proxy.example:8080",
+                ),
+                patch.object(downloaders, "run_command", run_command),
+                patch("builtins.print"),
+            ):
+                result = await downloaders.download_instagram_photo(
+                    "https://www.instagram.com/p/test/",
+                    temp_dir,
+                    user_id=123,
+                )
+
+        self.assertEqual(result, str(image_path))
+        command = run_command.await_args.args[0]
+        self.assertEqual(command[0], "gallery-dl")
+        proxy_index = command.index("--proxy")
+        self.assertEqual(
+            command[proxy_index + 1],
+            "http://proxy.example:8080",
+        )
+        timeout_index = command.index("--http-timeout")
+        self.assertEqual(command[timeout_index + 1], "30")
+        retry_index = command.index("-R")
+        self.assertEqual(command[retry_index + 1], "0")
+
+    async def test_429_output_raises_controlled_download_error(self):
+        run_command = AsyncMock(
+            return_value=command_result(
+                1,
+                stdout="HTTP Error 429: Too Many Requests",
+                stderr="raw Instagram response",
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.object(downloaders, "run_command", run_command),
+                patch.object(downloaders.LOGGER, "warning") as warning,
+                patch("builtins.print"),
+            ):
+                with self.assertRaises(InstagramRateLimitError) as context:
+                    await downloaders.download_instagram_photo(
+                        "https://www.instagram.com/p/test/",
+                        temp_dir,
+                        user_id=123,
+                    )
+
+        self.assertEqual(run_command.await_count, 1)
+        command = run_command.await_args.args[0]
+        timeout_index = command.index("--http-timeout")
+        self.assertEqual(command[timeout_index + 1], "30")
+        retry_index = command.index("-R")
+        self.assertEqual(command[retry_index + 1], "0")
+        self.assertEqual(
+            context.exception.last_error,
+            "Instagram photo download rate limited.",
+        )
+        self.assertNotIn(
+            "raw Instagram response",
+            context.exception.last_error,
+        )
+        warning.assert_called_once_with(
+            "Instagram gallery-dl rate limited for user %s (HTTP 429)",
+            123,
+        )
+
+    async def test_multiple_images_raise_carousel_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            gallery_dir = Path(temp_dir, "instagram_photo")
+
+            async def run_command_side_effect(command, user_id, timeout):
+                Path(gallery_dir, "one.jpg").write_bytes(b"one")
+                Path(gallery_dir, "two.jpg").write_bytes(b"two")
+                return command_result(0, stdout="download complete")
+
+            with (
+                patch.object(
+                    downloaders,
+                    "run_command",
+                    AsyncMock(side_effect=run_command_side_effect),
+                ),
+                patch("builtins.print"),
+            ):
+                with self.assertRaises(
+                    InstagramCarouselNotSupportedError
+                ):
+                    await downloaders.download_instagram_photo(
+                        "https://www.instagram.com/p/test/",
+                        temp_dir,
+                        user_id=123,
+                    )
+
+    async def test_mixed_media_carousel_raises_carousel_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            gallery_dir = Path(temp_dir, "instagram_photo")
+
+            async def run_command_side_effect(command, user_id, timeout):
+                Path(gallery_dir, "one.jpg").write_bytes(b"one")
+                Path(gallery_dir, "two.mp4").write_bytes(b"two")
+                return command_result(0, stdout="download complete")
+
+            with (
+                patch.object(
+                    downloaders,
+                    "run_command",
+                    AsyncMock(side_effect=run_command_side_effect),
+                ),
+                patch("builtins.print"),
+            ):
+                with self.assertRaises(
+                    InstagramCarouselNotSupportedError
+                ):
+                    await downloaders.download_instagram_photo(
+                        "https://www.instagram.com/p/test/",
+                        temp_dir,
+                        user_id=123,
+                    )
+
+    async def test_gallery_failure_raises_controlled_download_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.object(
+                    downloaders,
+                    "run_command",
+                    AsyncMock(
+                        return_value=command_result(
+                            1,
+                            stderr="private raw gallery error",
+                        )
+                    ),
+                ),
+                patch("builtins.print"),
+            ):
+                with self.assertRaises(DownloadFailedError) as context:
+                    await downloaders.download_instagram_photo(
+                        "https://www.instagram.com/p/test/",
+                        temp_dir,
+                        user_id=123,
+                    )
+
+        self.assertEqual(
+            context.exception.last_error,
+            "Instagram photo download failed.",
+        )
+        self.assertNotIn(
+            "private raw gallery error",
+            context.exception.last_error,
+        )
+
+    async def test_missing_image_raises_download_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.object(
+                    downloaders,
+                    "run_command",
+                    AsyncMock(return_value=command_result(0)),
+                ),
+                patch("builtins.print"),
+            ):
+                with self.assertRaises(DownloadFailedError) as context:
+                    await downloaders.download_instagram_photo(
+                        "https://www.instagram.com/p/test/",
+                        temp_dir,
+                        user_id=123,
+                    )
+
+        self.assertEqual(
+            context.exception.last_error,
+            "Instagram photo not found.",
+        )
+
+
+class PinterestDownloadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_video_download_uses_generic_flow_and_perf_logging(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video_path = Path(temp_dir, "pinterest-video.mp4")
+
+            async def run_command_side_effect(command, user_id, timeout):
+                video_path.write_bytes(b"video")
+                return command_result(
+                    0,
+                    stdout=(
+                        "[info] Pin: Downloading 1 format(s): "
+                        "v720+a1"
+                    ),
+                )
+
+            with (
+                patch.object(
+                    downloaders,
+                    "run_command",
+                    AsyncMock(side_effect=run_command_side_effect),
+                ),
+                patch("builtins.print") as mock_print,
+            ):
+                result = await downloaders.download_video(
+                    "pinterest",
+                    "https://pin.it/AbCd123",
+                    temp_dir,
+                    user_id=123,
+                )
+
+        self.assertEqual(result, str(video_path))
+        output = [call.args[0] for call in mock_print.call_args_list]
+        self.assertTrue(any(
+            "platform=pinterest selected_format=" in line
+            and "format_id=v720+a1" in line
+            for line in output
+        ))
+        self.assertTrue(any(
+            "platform=pinterest download=" in line
+            for line in output
+        ))
+
+    async def test_image_only_pin_raises_controlled_error(self):
+        raw_error = "ERROR: [Pinterest] Pin: No video formats found!"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.object(
+                    downloaders,
+                    "run_command",
+                    AsyncMock(
+                        return_value=command_result(
+                            1,
+                            stderr=raw_error,
+                        )
+                    ),
+                ),
+                patch("builtins.print"),
+            ):
+                with self.assertRaises(
+                    PinterestUnsupportedMediaError
+                ) as context:
+                    await downloaders.download_video(
+                        "pinterest",
+                        "https://www.pinterest.com/pin/123456789/",
+                        temp_dir,
+                        user_id=123,
+                    )
+
+        self.assertEqual(
+            context.exception.last_error,
+            "Pinterest Pin does not contain supported video media.",
+        )
+        self.assertNotIn(raw_error, context.exception.last_error)
+
+    async def test_duration_and_file_size_errors_remain_classified(self):
+        cases = (
+            (
+                "Pin does not pass filter "
+                f"(duration <=? {MAX_DURATION_SECONDS}), skipping",
+                DownloadDurationLimitError,
+            ),
+            (TOO_LARGE_OUTPUT, DownloadFileTooLargeError),
+        )
+
+        for command_output, expected_error in cases:
+            with self.subTest(expected_error=expected_error.__name__):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    with (
+                        patch.object(
+                            downloaders,
+                            "run_command",
+                            AsyncMock(
+                                return_value=command_result(
+                                    1,
+                                    stderr=command_output,
+                                )
+                            ),
+                        ),
+                        patch("builtins.print"),
+                    ):
+                        with self.assertRaises(expected_error):
+                            await downloaders.download_video(
+                                "pinterest",
+                                "https://pin.it/AbCd123",
+                                temp_dir,
+                                user_id=123,
+                            )
+
+
 class DownloadConfigurationTests(unittest.TestCase):
     def test_duration_limit_is_fifteen_minutes(self):
         self.assertEqual(MAX_DURATION_SECONDS, 15 * 60)
@@ -727,6 +1029,60 @@ class DownloadConfigurationTests(unittest.TestCase):
         self.assertIn("format_id=http-123", twitter_output.args[0])
         self.assertTrue(youtube_output.kwargs["flush"])
         self.assertTrue(twitter_output.kwargs["flush"])
+
+    def test_pinterest_perf_logs_portrait_resolution_when_available(self):
+        metadata = {
+            "formats": [
+                {
+                    "format_id": "v720",
+                    "width": 720,
+                    "height": 1280,
+                    "vcodec": "avc1.640028",
+                    "acodec": "none",
+                },
+                {
+                    "format_id": "a1",
+                    "vcodec": "none",
+                    "acodec": "mp4a.40.2",
+                },
+            ],
+        }
+
+        with patch("builtins.print") as mock_print:
+            downloaders.log_selected_format(
+                "pinterest",
+                downloaders.PINTEREST_FORMAT,
+                "[info] Pin: Downloading 1 format(s): v720+a1",
+                metadata,
+            )
+
+        output = mock_print.call_args.args[0]
+        self.assertIn("platform=pinterest", output)
+        self.assertIn("actual_width=720", output)
+        self.assertIn("actual_height=1280", output)
+        self.assertIn("actual_resolution=720x1280", output)
+        self.assertIn("vcodec=avc1.640028", output)
+        self.assertIn("acodec=mp4a.40.2", output)
+
+    def test_pinterest_video_command_preserves_portrait_quality(self):
+        commands = downloaders.build_commands(
+            "pinterest",
+            "/tmp/%(title)s.%(ext)s",
+            "https://pin.it/AbCd123",
+        )
+
+        self.assertEqual(len(commands), 1)
+        command = commands[0]
+        format_index = command.index("-f")
+        self.assertEqual(
+            command[format_index + 1],
+            "bv[vcodec^=avc1]+ba/b[ext=mp4]/best",
+        )
+        sort_index = command.index("-S")
+        self.assertEqual(command[sort_index + 1], "res:1080,br")
+        self.assertNotIn("height<=1080", command[format_index + 1])
+        self.assertIn("--merge-output-format", command)
+        self.assertNotIn("--recode-video", command)
 
     def test_youtube_metadata_commands_do_not_download_media(self):
         commands = downloaders.build_youtube_metadata_commands(
@@ -875,6 +1231,12 @@ class DownloadConfigurationTests(unittest.TestCase):
         self.assertTrue(
             downloaders.is_duration_limit_error(DURATION_LIMIT_OUTPUT)
         )
+        self.assertTrue(
+            downloaders.is_duration_limit_error(
+                "[download] Reel does not pass filter "
+                f"(duration <=? {MAX_DURATION_SECONDS}), skipping"
+            )
+        )
         self.assertFalse(
             downloaders.is_duration_limit_error(
                 "Video does not pass filter (view_count >= 1000), skipping"
@@ -883,6 +1245,12 @@ class DownloadConfigurationTests(unittest.TestCase):
         self.assertFalse(
             downloaders.is_duration_limit_error(
                 f"duration <= {MAX_DURATION_SECONDS}"
+            )
+        )
+        self.assertFalse(
+            downloaders.is_duration_limit_error(
+                "[instagram] duration is NA; continuing with filter "
+                f"(duration <=? {MAX_DURATION_SECONDS})"
             )
         )
 
@@ -911,7 +1279,13 @@ class DownloadConfigurationTests(unittest.TestCase):
         )
 
     def test_all_commands_use_configured_max_size(self):
-        for platform in ("youtube", "tiktok", "twitter", "instagram"):
+        for platform in (
+            "youtube",
+            "tiktok",
+            "twitter",
+            "instagram",
+            "pinterest",
+        ):
             commands = downloaders.build_commands(
                 platform,
                 "/tmp/%(title)s.%(ext)s",
@@ -923,7 +1297,15 @@ class DownloadConfigurationTests(unittest.TestCase):
                 self.assertEqual(command[option_index + 1], f"{MAX_MB}M")
 
     def test_all_commands_use_configured_duration_limit(self):
-        for platform in ("youtube", "tiktok", "twitter", "instagram"):
+        expected_filters = {
+            "youtube": f"duration <= {MAX_DURATION_SECONDS}",
+            "tiktok": f"duration <= {MAX_DURATION_SECONDS}",
+            "twitter": f"duration <= {MAX_DURATION_SECONDS}",
+            "instagram": f"duration <=? {MAX_DURATION_SECONDS}",
+            "pinterest": f"duration <=? {MAX_DURATION_SECONDS}",
+        }
+
+        for platform, expected_filter in expected_filters.items():
             commands = downloaders.build_commands(
                 platform,
                 "/tmp/%(title)s.%(ext)s",
@@ -934,7 +1316,7 @@ class DownloadConfigurationTests(unittest.TestCase):
                 option_index = command.index("--match-filter")
                 self.assertEqual(
                     command[option_index + 1],
-                    f"duration <= {MAX_DURATION_SECONDS}",
+                    expected_filter,
                 )
 
 

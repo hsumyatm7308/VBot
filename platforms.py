@@ -124,6 +124,31 @@ def get_platform(url: str):
 
         return None
 
+    # Pinterest video Pins
+    if host == "pin.it":
+        short_code = path.strip("/")
+        if short_code and "/" not in short_code:
+            return "pinterest"
+
+        return None
+
+    pinterest_hosts = {
+        "pinterest.com",
+        "www.pinterest.com",
+        "m.pinterest.com",
+    }
+
+    if host in pinterest_hosts:
+        path_parts = [
+            part
+            for part in path.strip("/").split("/")
+            if part
+        ]
+        if len(path_parts) == 2 and path_parts[0].lower() == "pin":
+            return "pinterest"
+
+        return None
+
     return None
 
 
@@ -131,3 +156,17 @@ def is_tiktok_photo_url(url: str) -> bool:
     parsed = urlparse(url)
     path = parsed.path or ""
     return "/photo/" in path
+
+
+def is_instagram_post_url(url: str) -> bool:
+    parsed = urlparse(url)
+
+    return (
+        parsed.netloc.lower()
+        in {
+            "instagram.com",
+            "www.instagram.com",
+            "m.instagram.com",
+        }
+        and parsed.path.lower().startswith("/p/")
+    )
