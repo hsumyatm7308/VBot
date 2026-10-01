@@ -170,3 +170,20 @@ def is_instagram_post_url(url: str) -> bool:
         }
         and parsed.path.lower().startswith("/p/")
     )
+
+
+def is_instagram_story_url(url: str) -> bool:
+    parsed = urlparse(url)
+
+    return (
+        parsed.scheme in {"http", "https"}
+        and parsed.username is None
+        and parsed.password is None
+        and (parsed.hostname or "").lower().rstrip(".")
+        in {
+            "instagram.com",
+            "www.instagram.com",
+            "m.instagram.com",
+        }
+        and parsed.path.lower().startswith("/stories/")
+    )

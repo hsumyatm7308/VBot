@@ -1,6 +1,6 @@
 import unittest
 
-from platforms import get_platform
+from platforms import get_platform, is_instagram_story_url
 
 
 class PinterestPlatformTests(unittest.TestCase):
@@ -34,6 +34,16 @@ class PinterestPlatformTests(unittest.TestCase):
         for url in unsupported_urls:
             with self.subTest(url=url):
                 self.assertIsNone(get_platform(url))
+
+
+class InstagramPlatformTests(unittest.TestCase):
+    def test_story_url_is_identified_but_remains_unsupported(self):
+        story_url = (
+            "https://www.instagram.com/stories/tester/123456/"
+        )
+
+        self.assertTrue(is_instagram_story_url(story_url))
+        self.assertIsNone(get_platform(story_url))
 
 
 if __name__ == "__main__":

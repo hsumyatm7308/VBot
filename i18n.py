@@ -77,6 +77,9 @@ TEXTS = {
         "active_download": "A download is already active.",
         "invalid_url": "Send a valid link.",
         "unsupported_url": "This link is not supported.",
+        "instagram_story_not_supported": (
+            "Instagram Story links are not supported yet."
+        ),
         "tiktok_resolve_failed": "The TikTok link could not be resolved.",
         "checking": "Checking link…",
         "downloading": "Downloading…",
@@ -111,6 +114,10 @@ TEXTS = {
         ),
         "instagram_rate_limited": (
             "Instagram is temporarily rate limiting downloads.\n\n"
+            "Please try again later."
+        ),
+        "instagram_photo_temporarily_unavailable": (
+            "This Instagram photo can’t be downloaded right now.\n\n"
             "Please try again later."
         ),
         "pinterest_video_only": (
@@ -213,6 +220,9 @@ TEXTS = {
         "active_download": "Download တစ်ခု လုပ်ဆောင်နေပြီးဖြစ်သည်။",
         "invalid_url": "မှန်ကန်သော link တစ်ခု ပို့ပါ။",
         "unsupported_url": "ဤ link ကို support မလုပ်ပါ။",
+        "instagram_story_not_supported": (
+            "ဤ Instagram Story link ကို လက်ရှိ support မလုပ်သေးပါ။"
+        ),
         "tiktok_resolve_failed": "TikTok link ကို resolve မလုပ်နိုင်ပါ။",
         "checking": "Link စစ်နေသည်…",
         "downloading": "Download လုပ်နေသည်…",
@@ -247,6 +257,10 @@ TEXTS = {
         ),
         "instagram_rate_limited": (
             "Instagram က download များကို ယာယီကန့်သတ်ထားပါတယ်။\n\n"
+            "ခဏနောက်မှ ပြန်စမ်းပါ။"
+        ),
+        "instagram_photo_temporarily_unavailable": (
+            "ဒီ Instagram photo ကို အခုချိန်မှာ download မလုပ်နိုင်သေးပါ။\n\n"
             "ခဏနောက်မှ ပြန်စမ်းပါ။"
         ),
         "pinterest_video_only": (

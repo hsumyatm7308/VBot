@@ -78,6 +78,7 @@ class HandleUrlSizeTests(unittest.IsolatedAsyncioTestCase):
         photo_download,
         reply_document=None,
         url="https://www.instagram.com/p/test/",
+        language="en",
     ):
         user = SimpleNamespace(id=123, username="tester")
         status_message = SimpleNamespace(edit_text=AsyncMock())
@@ -95,7 +96,7 @@ class HandleUrlSizeTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 handlers,
                 "get_user_language",
-                return_value="en",
+                return_value=language,
             ),
             patch.object(
                 handlers,
@@ -276,23 +277,115 @@ class HandleUrlSizeTests(unittest.IsolatedAsyncioTestCase):
             for call in status_message.edit_text.await_args_list
         ]
         self.assertIn(
-            get_text("en", "instagram_rate_limited"),
+            get_text(
+                "en",
+                "instagram_photo_temporarily_unavailable",
+            ),
             edited_messages,
         )
         message.reply_video.assert_not_awaited()
         message.reply_document.assert_not_awaited()
         increment_usage.assert_not_called()
 
-    def test_instagram_rate_limit_messages_are_localized(self):
+    async def test_instagram_rate_limit_shows_myanmar_photo_message(self):
+        message, status_message, increment_usage = (
+            await self.run_instagram_post_handler(
+                AsyncMock(
+                    side_effect=DownloadFailedError("video unavailable")
+                ),
+                AsyncMock(
+                    side_effect=InstagramRateLimitError(
+                        "Instagram photo download rate limited."
+                    )
+                ),
+                language="my",
+            )
+        )
+
+        edited_messages = [
+            call.args[0]
+            for call in status_message.edit_text.await_args_list
+        ]
+        self.assertIn(
+            get_text(
+                "my",
+                "instagram_photo_temporarily_unavailable",
+            ),
+            edited_messages,
+        )
+        message.reply_video.assert_not_awaited()
+        message.reply_document.assert_not_awaited()
+        increment_usage.assert_not_called()
+
+    def test_instagram_photo_temporary_messages_are_localized(self):
         self.assertEqual(
-            get_text("en", "instagram_rate_limited"),
-            "Instagram is temporarily rate limiting downloads.\n\n"
+            get_text(
+                "en",
+                "instagram_photo_temporarily_unavailable",
+            ),
+            "This Instagram photo can’t be downloaded right now.\n\n"
             "Please try again later.",
         )
         self.assertEqual(
-            get_text("my", "instagram_rate_limited"),
-            "Instagram က download များကို ယာယီကန့်သတ်ထားပါတယ်။\n\n"
+            get_text(
+                "my",
+                "instagram_photo_temporarily_unavailable",
+            ),
+            "ဒီ Instagram photo ကို အခုချိန်မှာ download မလုပ်နိုင်သေးပါ။\n\n"
             "ခဏနောက်မှ ပြန်စမ်းပါ။",
+        )
+
+    async def test_instagram_story_remains_unsupported_with_specific_message(
+        self,
+    ):
+        user = SimpleNamespace(id=123, username="tester")
+        message = SimpleNamespace(
+            text="https://www.instagram.com/stories/tester/123456/",
+            reply_text=AsyncMock(),
+        )
+        update = SimpleNamespace(effective_user=user, message=message)
+
+        with (
+            patch.object(handlers, "PUBLIC_ACCESS", True),
+            patch.object(
+                handlers,
+                "get_user_language",
+                return_value="en",
+            ),
+            patch.object(
+                handlers,
+                "has_accepted_terms",
+                return_value=True,
+            ),
+            patch.object(handlers, "get_daily_usage", return_value=0),
+            patch.object(handlers, "is_download_active", return_value=False),
+            patch.object(handlers, "is_http_url", return_value=True),
+            patch.object(
+                handlers,
+                "is_instagram_story_url",
+                return_value=True,
+            ),
+            patch.object(handlers, "get_platform") as get_platform,
+            patch.object(handlers, "begin_download") as begin_download,
+            patch.object(handlers, "download_video") as download_video,
+        ):
+            await handlers.handle_url(update, Mock())
+
+        message.reply_text.assert_awaited_once_with(
+            get_text("en", "instagram_story_not_supported")
+        )
+        get_platform.assert_not_called()
+        begin_download.assert_not_called()
+        download_video.assert_not_called()
+
+    def test_instagram_story_messages_are_localized(self):
+        self.assertEqual(
+            get_text("en", "instagram_story_not_supported"),
+            "Instagram Story links are not supported yet.",
+        )
+        self.assertEqual(
+            get_text("my", "instagram_story_not_supported"),
+            "ဤ Instagram Story link ကို လက်ရှိ support မလုပ်သေးပါ။",
         )
 
     async def test_instagram_logs_file_size_and_upload_time(self):
