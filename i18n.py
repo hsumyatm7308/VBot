@@ -79,6 +79,16 @@ TEXTS = {
         "download_rate_limited": (
             "Please wait before starting another download."
         ),
+        "download_queue_full": (
+            "Your download queue is full. Please wait for one of your "
+            "current downloads to finish."
+        ),
+        "download_queued": (
+            "⏳ Added to your download queue.\nPosition: {position}"
+        ),
+        "download_queue_cancelled": (
+            "Download cancelled and your queue was cleared."
+        ),
         "invalid_url": "Send a valid link.",
         "unsupported_url": "This link is not supported.",
         "instagram_story_not_supported": (
@@ -228,6 +238,17 @@ TEXTS = {
         "active_download": "Download တစ်ခု လုပ်ဆောင်နေပြီးဖြစ်သည်။",
         "download_rate_limited": (
             "နောက်ထပ် download မစတင်မီ ခဏစောင့်ပါ။"
+        ),
+        "download_queue_full": (
+            "သင့် download queue ပြည့်နေပါပြီ။ လက်ရှိ download "
+            "တစ်ခုပြီးသွားတဲ့အထိ စောင့်ပေးပါ။"
+        ),
+        "download_queued": (
+            "⏳ Download queue ထဲ ထည့်ပြီးပါပြီ။\nအဆင့်: {position}"
+        ),
+        "download_queue_cancelled": (
+            "Download ကို ပယ်ဖျက်ပြီး queue ထဲက download များကိုလည်း "
+            "ရှင်းပြီးပါပြီ။"
         ),
         "invalid_url": "မှန်ကန်သော link တစ်ခု ပို့ပါ။",
         "unsupported_url": "ဤ link ကို support မလုပ်ပါ။",

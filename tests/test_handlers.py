@@ -15,6 +15,13 @@ from utils import (
 )
 
 
+async def submit_and_wait(update, context):
+    await handlers.handle_url(update, context)
+    await handlers.DOWNLOAD_QUEUE.wait_until_idle(
+        update.effective_user.id
+    )
+
+
 class HandleUrlSizeTests(unittest.IsolatedAsyncioTestCase):
     async def run_pinterest_handler(self, video_download):
         user = SimpleNamespace(id=123, username="tester")
@@ -43,9 +50,7 @@ class HandleUrlSizeTests(unittest.IsolatedAsyncioTestCase):
             patch.object(handlers, "is_download_active", return_value=False),
             patch.object(handlers, "is_http_url", return_value=True),
             patch.object(handlers, "get_platform", return_value="pinterest"),
-            patch.object(handlers, "try_begin_download", return_value=True),
             patch.object(handlers, "try_record_download_attempt", return_value=True),
-            patch.object(handlers, "finish_download"),
             patch.object(handlers, "download_video", video_download),
             patch.object(
                 handlers,
@@ -69,7 +74,7 @@ class HandleUrlSizeTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch("builtins.print") as mock_print,
         ):
-            await handlers.handle_url(update, Mock())
+            await submit_and_wait(update, Mock())
 
         return message, status_message, increment_usage, mock_print
 
@@ -93,13 +98,11 @@ class HandleUrlSizeTests(unittest.IsolatedAsyncioTestCase):
             patch.object(handlers, "is_download_active", return_value=False),
             patch.object(handlers, "is_http_url", return_value=True),
             patch.object(handlers, "get_platform", return_value="youtube"),
-            patch.object(handlers, "try_begin_download", return_value=True),
             patch.object(
                 handlers,
                 "try_record_download_attempt",
                 return_value=False,
             ),
-            patch.object(handlers, "finish_download") as finish_download,
             patch.object(handlers, "download_video", download_video),
             patch.object(handlers, "increment_daily_usage", increment_usage),
         ):
@@ -108,7 +111,6 @@ class HandleUrlSizeTests(unittest.IsolatedAsyncioTestCase):
         message.reply_text.assert_awaited_once_with(
             get_text("en", "download_rate_limited")
         )
-        finish_download.assert_called_once_with(8844)
         download_video.assert_not_awaited()
         increment_usage.assert_not_called()
 
@@ -147,9 +149,7 @@ class HandleUrlSizeTests(unittest.IsolatedAsyncioTestCase):
             patch.object(handlers, "is_download_active", return_value=False),
             patch.object(handlers, "is_http_url", return_value=True),
             patch.object(handlers, "get_platform", return_value="instagram"),
-            patch.object(handlers, "try_begin_download", return_value=True),
             patch.object(handlers, "try_record_download_attempt", return_value=True),
-            patch.object(handlers, "finish_download"),
             patch.object(handlers, "download_video", video_download),
             patch.object(
                 handlers,
@@ -173,7 +173,7 @@ class HandleUrlSizeTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch("builtins.print"),
         ):
-            await handlers.handle_url(update, Mock())
+            await submit_and_wait(update, Mock())
 
         return message, status_message, increment_usage
 
@@ -407,10 +407,6 @@ class HandleUrlSizeTests(unittest.IsolatedAsyncioTestCase):
                 return_value=True,
             ),
             patch.object(handlers, "get_platform") as get_platform,
-            patch.object(
-                handlers,
-                "try_begin_download",
-            ) as try_begin_download,
             patch.object(handlers, "download_video") as download_video,
         ):
             await handlers.handle_url(update, Mock())
@@ -419,7 +415,6 @@ class HandleUrlSizeTests(unittest.IsolatedAsyncioTestCase):
             get_text("en", "instagram_story_not_supported")
         )
         get_platform.assert_not_called()
-        try_begin_download.assert_not_called()
         download_video.assert_not_called()
 
     def test_instagram_story_messages_are_localized(self):
@@ -462,9 +457,7 @@ class HandleUrlSizeTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(handlers, "is_download_active", return_value=False),
                 patch.object(handlers, "is_http_url", return_value=True),
                 patch.object(handlers, "get_platform", return_value="instagram"),
-                patch.object(handlers, "try_begin_download", return_value=True),
                 patch.object(handlers, "try_record_download_attempt", return_value=True),
-                patch.object(handlers, "finish_download"),
                 patch.object(
                     handlers,
                     "download_video",
@@ -488,7 +481,7 @@ class HandleUrlSizeTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 patch("builtins.print") as mock_print,
             ):
-                await handlers.handle_url(update, Mock())
+                await submit_and_wait(update, Mock())
 
         output = [call.args[0] for call in mock_print.call_args_list]
         self.assertIn(
@@ -592,9 +585,7 @@ class HandleUrlSizeTests(unittest.IsolatedAsyncioTestCase):
             patch.object(handlers, "is_download_active", return_value=False),
             patch.object(handlers, "is_http_url", return_value=True),
             patch.object(handlers, "get_platform", return_value="youtube"),
-            patch.object(handlers, "try_begin_download", return_value=True),
             patch.object(handlers, "try_record_download_attempt", return_value=True),
-            patch.object(handlers, "finish_download"),
             patch.object(
                 handlers,
                 "download_video",
@@ -615,7 +606,7 @@ class HandleUrlSizeTests(unittest.IsolatedAsyncioTestCase):
                 "increment_daily_usage",
             ) as increment_usage,
         ):
-            await handlers.handle_url(update, Mock())
+            await submit_and_wait(update, Mock())
 
         expected_message = get_text(
             "en",
@@ -683,9 +674,7 @@ class HandleUrlSizeTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(handlers, "is_download_active", return_value=False),
                 patch.object(handlers, "is_http_url", return_value=True),
                 patch.object(handlers, "get_platform", return_value="youtube"),
-                patch.object(handlers, "try_begin_download", return_value=True),
                 patch.object(handlers, "try_record_download_attempt", return_value=True),
-                patch.object(handlers, "finish_download"),
                 patch.object(
                     handlers,
                     "download_video",
@@ -701,7 +690,7 @@ class HandleUrlSizeTests(unittest.IsolatedAsyncioTestCase):
                     "increment_daily_usage",
                 ) as increment_usage,
             ):
-                await handlers.handle_url(update, Mock())
+                await submit_and_wait(update, Mock())
 
         size_mb = handlers.MAX_MB + 1
         expected_message = get_text(

@@ -9,7 +9,8 @@ from telegram.ext import ApplicationHandlerStop
 from i18n import get_text
 import handlers
 from downloader_core import process
-from telegram_handlers.cancellation import request_download_cancellation
+from telegram_handlers import cancellation
+from telegram_handlers.cancellation import cancel_command
 from telegram_handlers.download import get_download_semaphore
 from telegram_handlers.access import enforce_private_chat
 
@@ -82,8 +83,70 @@ class PrivateChatEnforcementTests(unittest.IsolatedAsyncioTestCase):
             "ဒီ bot ကို private chat မှာပဲ အသုံးပြုပါ။",
         )
 
+    def test_queue_messages_are_localized(self):
+        self.assertEqual(
+            get_text("en", "download_queued", position=2),
+            "⏳ Added to your download queue.\nPosition: 2",
+        )
+        self.assertEqual(
+            get_text("my", "download_queued", position=2),
+            "⏳ Download queue ထဲ ထည့်ပြီးပါပြီ။\nအဆင့်: 2",
+        )
+        self.assertEqual(
+            get_text("en", "download_queue_full"),
+            "Your download queue is full. Please wait for one of your "
+            "current downloads to finish.",
+        )
+        self.assertEqual(
+            get_text("my", "download_queue_full"),
+            "သင့် download queue ပြည့်နေပါပြီ။ လက်ရှိ download "
+            "တစ်ခုပြီးသွားတဲ့အထိ စောင့်ပေးပါ။",
+        )
+
 
 class DownloadConcurrencyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancel_stops_active_process_and_clears_queue(self):
+        user_id = 631234
+        fake_process = SimpleNamespace(returncode=None)
+        process.ACTIVE_USERS.add(user_id)
+        process.ACTIVE_PROCESSES[user_id] = fake_process
+        stop_process = AsyncMock()
+        message = SimpleNamespace(reply_text=AsyncMock())
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=user_id),
+            message=message,
+        )
+
+        with (
+            patch.object(process, "_stop_process", stop_process),
+            patch.object(cancellation, "get_language", return_value="my"),
+        ):
+            await cancel_command(update, Mock())
+
+        stop_process.assert_awaited_once_with(fake_process)
+        message.reply_text.assert_awaited_once_with(
+            get_text("my", "download_queue_cancelled"),
+            reply_markup=handlers.get_home_keyboard("my"),
+        )
+        process.ACTIVE_USERS.discard(user_id)
+        process.CANCEL_REQUESTS.discard(user_id)
+
+    async def test_cancel_without_active_or_queued_work_keeps_existing_message(self):
+        user_id = 631235
+        message = SimpleNamespace(reply_text=AsyncMock())
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id=user_id),
+            message=message,
+        )
+
+        with patch.object(cancellation, "get_language", return_value="en"):
+            await cancel_command(update, Mock())
+
+        message.reply_text.assert_awaited_once_with(
+            get_text("en", "no_active_download"),
+            reply_markup=handlers.get_home_keyboard("en"),
+        )
+
     async def test_semaphore_caps_jobs_and_cancels_waiter(self):
         semaphore = get_download_semaphore()
         entered = 0
@@ -111,7 +174,7 @@ class DownloadConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         release.set()
         await asyncio.gather(*jobs[:2])
 
-    async def test_same_user_second_request_is_blocked_while_resolving(self):
+    async def test_same_user_second_request_is_queued_while_resolving(self):
         process.ACTIVE_USERS.clear()
         process.CANCEL_REQUESTS.clear()
         started = asyncio.Event()
@@ -149,17 +212,36 @@ class DownloadConcurrencyTests(unittest.IsolatedAsyncioTestCase):
                 handlers.handle_url(first_update, Mock())
             )
             await asyncio.wait_for(started.wait(), timeout=1)
+            await first_task
 
             self.assertTrue(process.is_download_active(7451))
             self.assertFalse(process.try_begin_download(7451))
 
             await handlers.handle_url(second_update, Mock())
             second_update.message.reply_text.assert_awaited_once_with(
-                get_text("en", "active_download")
+                get_text(
+                    "en",
+                    "download_queued",
+                    position=1,
+                )
             )
 
-            self.assertTrue(await request_download_cancellation(7451))
-            await asyncio.wait_for(first_task, timeout=1)
+            cancel_message = SimpleNamespace(reply_text=AsyncMock())
+            cancel_update = SimpleNamespace(
+                effective_user=SimpleNamespace(id=7451),
+                message=cancel_message,
+            )
+            with patch(
+                "telegram_handlers.cancellation.get_language",
+                return_value="en",
+            ):
+                await cancel_command(cancel_update, Mock())
+
+            cancel_message.reply_text.assert_awaited_once_with(
+                get_text("en", "download_queue_cancelled"),
+                reply_markup=handlers.get_home_keyboard("en"),
+            )
+            await handlers.DOWNLOAD_QUEUE.wait_until_idle(7451)
 
         self.assertFalse(process.is_download_active(7451))
         process.CANCEL_REQUESTS.clear()

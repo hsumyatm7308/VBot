@@ -21,6 +21,7 @@ from utils import (
     ensure_temporary_disk_space,
 )
 from config import MAX_CONCURRENT_DOWNLOADS
+from telegram_handlers.queue import DOWNLOAD_QUEUE, DownloadJob
 
 
 _DOWNLOAD_SEMAPHORES = weakref.WeakKeyDictionary()
@@ -82,12 +83,6 @@ async def prepare_request(update, deps, request_started_at):
         )
         return None
 
-    if deps.is_download_active(user_id):
-        await update.message.reply_text(
-            deps.get_text(language, "active_download")
-        )
-        return None
-
     url = update.message.text.strip()
     if not deps.is_http_url(url):
         await update.message.reply_text(
@@ -105,19 +100,6 @@ async def prepare_request(update, deps, request_started_at):
     if platform is None:
         await update.message.reply_text(
             deps.get_text(language, "unsupported_url")
-        )
-        return None
-
-    if not deps.try_begin_download(user_id):
-        await update.message.reply_text(
-            deps.get_text(language, "active_download")
-        )
-        return None
-
-    if not deps.try_record_download_attempt(user_id):
-        deps.finish_download(user_id)
-        await update.message.reply_text(
-            deps.get_text(language, "download_rate_limited")
         )
         return None
 
@@ -193,7 +175,7 @@ async def stop_progress_updates(status_task, stop_event):
     return None
 
 
-async def upload_media(update, request, media_path, media_kind, deps):
+async def upload_media(message, request, media_path, media_kind, deps):
     upload_started_at = time.perf_counter()
     try:
         with open(media_path, "rb") as media:
@@ -205,12 +187,12 @@ async def upload_media(update, request, media_path, media_kind, deps):
                 "pool_timeout": 30,
             }
             if media_kind == "photo":
-                await update.message.reply_document(
+                await message.reply_document(
                     document=media,
                     **upload_options,
                 )
             else:
-                await update.message.reply_video(
+                await message.reply_video(
                     video=media,
                     supports_streaming=True,
                     **upload_options,
@@ -223,25 +205,20 @@ async def upload_media(update, request, media_path, media_kind, deps):
         )
 
 
-async def handle_url(update, context, deps):
-    request_started_at = time.perf_counter()
-    request = await prepare_request(update, deps, request_started_at)
-    if request is None:
-        return
-
+async def process_download_job(
+    message,
+    request: DownloadRequest,
+    deps,
+    request_started_at: float,
+):
     user_id = request.user_id
     language = request.language
     platform = request.platform
-
-    current_task = asyncio.current_task()
-    if current_task is not None:
-        deps.active_download_tasks[user_id] = current_task
 
     status_message = None
     stop_event = asyncio.Event()
     status_task = None
     cancel_keyboard = deps.get_cancel_keyboard(language)
-    download_finished = False
 
     try:
         if platform == "tiktok":
@@ -257,7 +234,7 @@ async def handle_url(update, context, deps):
 
             resolved_platform = deps.get_platform(resolved_url)
             if resolved_platform is None:
-                await update.message.reply_text(
+                await message.reply_text(
                     deps.get_text(language, "tiktok_resolve_failed")
                 )
                 return
@@ -275,7 +252,7 @@ async def handle_url(update, context, deps):
             )
             platform = request.platform
 
-        status_message = await update.message.reply_text(
+        status_message = await message.reply_text(
             deps.get_text(language, "checking"),
             reply_markup=cancel_keyboard,
         )
@@ -337,7 +314,7 @@ async def handle_url(update, context, deps):
             )
 
             await upload_media(
-                update,
+                message,
                 request,
                 media_path,
                 media_kind,
@@ -345,8 +322,6 @@ async def handle_url(update, context, deps):
             )
 
             deps.increment_daily_usage(user_id)
-            deps.finish_download(user_id)
-            download_finished = True
 
             used = deps.get_daily_usage(user_id)
             remaining = deps.get_remaining_downloads(user_id)
@@ -481,14 +456,8 @@ async def handle_url(update, context, deps):
                     and not deps.is_download_cancelled(user_id)
                 )
 
-        if deps.active_download_tasks.get(user_id) is current_task:
-            deps.active_download_tasks.pop(user_id, None)
-
         if deps.active_status_messages.get(user_id) is status_message:
             deps.active_status_messages.pop(user_id, None)
-
-        if not download_finished:
-            deps.finish_download(user_id)
 
         deps.log_performance(
             platform,
@@ -498,3 +467,76 @@ async def handle_url(update, context, deps):
 
         if propagate_cancellation:
             raise asyncio.CancelledError
+
+
+async def _run_queued_request(message, request, deps, request_started_at):
+    user_id = request.user_id
+    if deps.get_daily_usage(user_id) >= deps.daily_limit:
+        await message.reply_text(
+            deps.get_text(
+                request.language,
+                "daily_limit_reached",
+                daily_limit=deps.daily_limit,
+            ),
+            reply_markup=deps.get_home_keyboard(request.language),
+        )
+        deps.log_performance(
+            request.platform,
+            "total",
+            request_started_at,
+        )
+        return
+
+    await process_download_job(
+        message,
+        request,
+        deps,
+        request_started_at,
+    )
+
+
+async def handle_url(update, context, deps):
+    request_started_at = time.perf_counter()
+    request = await prepare_request(update, deps, request_started_at)
+    if request is None:
+        return
+
+    user_id = request.user_id
+    message = update.message
+    allow_cooldown = DOWNLOAD_QUEUE.has_work(user_id)
+    if not deps.try_record_download_attempt(
+        user_id,
+        allow_cooldown=allow_cooldown,
+    ):
+        await message.reply_text(
+            deps.get_text(request.language, "download_rate_limited")
+        )
+        return
+
+    job = DownloadJob(
+        user_id=user_id,
+        execute=lambda: _run_queued_request(
+            message,
+            request,
+            deps,
+            request_started_at,
+        ),
+        begin=lambda: deps.begin_download(user_id),
+        finish=lambda: deps.finish_download(user_id),
+    )
+    result = DOWNLOAD_QUEUE.enqueue(job)
+
+    if result.state == "full":
+        await message.reply_text(
+            deps.get_text(request.language, "download_queue_full")
+        )
+        return
+
+    if result.state == "queued":
+        await message.reply_text(
+            deps.get_text(
+                request.language,
+                "download_queued",
+                position=result.position,
+            )
+        )

@@ -67,6 +67,7 @@ LOGGER = logging.getLogger(__name__)
 
 ACTIVE_DOWNLOAD_TASKS = cancellation.ACTIVE_DOWNLOAD_TASKS
 ACTIVE_STATUS_MESSAGES = cancellation.ACTIVE_STATUS_MESSAGES
+DOWNLOAD_QUEUE = download.DOWNLOAD_QUEUE
 
 safe_edit_message = ui.safe_edit_message
 get_language = ui.get_language

@@ -10,6 +10,7 @@ from telegram.ext import (
 
 from config import BOT_TOKEN, MAX_CONCURRENT_UPDATES
 from database import init_legal_db
+from downloaders import cancel_download
 from utils import sanitize_log_text
 from handlers import (
     cancel_command,
@@ -28,6 +29,7 @@ from handlers import (
     terms_command,
 )
 from telegram_handlers.access import enforce_private_chat
+from telegram_handlers.queue import DOWNLOAD_QUEUE
 
 
 async def post_init(application):
@@ -43,6 +45,10 @@ async def post_init(application):
     ]
 
     await application.bot.set_my_commands(commands)
+
+
+async def post_shutdown(application):
+    await DOWNLOAD_QUEUE.shutdown(cancel_download)
 
 
 async def error_handler(update, context):
@@ -67,6 +73,7 @@ def main():
         .token(BOT_TOKEN)
         .concurrent_updates(MAX_CONCURRENT_UPDATES)
         .post_init(post_init)
+        .post_shutdown(post_shutdown)
         .build()
     )
 

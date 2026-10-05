@@ -327,9 +327,7 @@ class SuccessfulDownloadRecordingTests(unittest.IsolatedAsyncioTestCase):
                 return_value=False,
             ),
             patch.object(handlers, "get_platform", return_value="youtube"),
-            patch.object(handlers, "try_begin_download", return_value=True),
             patch.object(handlers, "try_record_download_attempt", return_value=True),
-            patch.object(handlers, "finish_download"),
             patch.object(
                 handlers,
                 "download_video",
@@ -344,6 +342,9 @@ class SuccessfulDownloadRecordingTests(unittest.IsolatedAsyncioTestCase):
             patch.object(handlers.LOGGER, "exception"),
         ):
             await handlers.handle_url(update, Mock())
+            await handlers.DOWNLOAD_QUEUE.wait_until_idle(
+                update.effective_user.id
+            )
 
         return reply_video
 

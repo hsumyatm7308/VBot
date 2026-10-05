@@ -34,7 +34,11 @@ def try_begin_download(user_id: int) -> bool:
     return True
 
 
-def try_record_download_attempt(user_id: int) -> bool:
+def try_record_download_attempt(
+    user_id: int,
+    *,
+    allow_cooldown: bool = False,
+) -> bool:
     """Apply a cooldown and rolling cap without storing submitted URLs."""
     now = time.monotonic()
     attempts = DOWNLOAD_ATTEMPTS[user_id]
@@ -43,7 +47,11 @@ def try_record_download_attempt(user_id: int) -> bool:
     while attempts and attempts[0] <= window_start:
         attempts.popleft()
 
-    if attempts and now - attempts[-1] < DOWNLOAD_ATTEMPT_COOLDOWN_SECONDS:
+    if (
+        not allow_cooldown
+        and attempts
+        and now - attempts[-1] < DOWNLOAD_ATTEMPT_COOLDOWN_SECONDS
+    ):
         return False
 
     if len(attempts) >= DOWNLOAD_ATTEMPT_MAX_PER_WINDOW:

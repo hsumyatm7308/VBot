@@ -8,19 +8,17 @@ from telegram_handlers.ui import (
     safe_edit_message,
     safe_edit_status_message,
 )
+from telegram_handlers.queue import DOWNLOAD_QUEUE
 
 
-ACTIVE_DOWNLOAD_TASKS: dict[int, asyncio.Task] = {}
+ACTIVE_DOWNLOAD_TASKS = DOWNLOAD_QUEUE.workers
 ACTIVE_STATUS_MESSAGES = {}
 
 
 async def request_download_cancellation(user_id: int) -> bool:
-    cancelled = await cancel_download(user_id)
-
-    if not cancelled:
-        return False
-
-    task = ACTIVE_DOWNLOAD_TASKS.get(user_id)
+    queue_state = DOWNLOAD_QUEUE.clear_waiting(user_id)
+    process_cancelled = await cancel_download(user_id)
+    task = queue_state.worker or ACTIVE_DOWNLOAD_TASKS.get(user_id)
     current_task = asyncio.current_task()
 
     if (
@@ -38,7 +36,7 @@ async def request_download_cancellation(user_id: int) -> bool:
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
 
-    return True
+    return queue_state.had_work or process_cancelled
 
 
 async def cancel_command(update, context):
@@ -57,12 +55,12 @@ async def cancel_command(update, context):
     if status_message is not None:
         await safe_edit_status_message(
             status_message,
-            get_text(language, "cancelled"),
+            get_text(language, "download_queue_cancelled"),
             reply_markup=get_home_keyboard(language),
         )
     else:
         await update.message.reply_text(
-            get_text(language, "cancelled"),
+            get_text(language, "download_queue_cancelled"),
             reply_markup=get_home_keyboard(language),
         )
 
@@ -74,7 +72,11 @@ async def handle_cancel_callback(update, context):
     user_id = query.from_user.id
     language = get_language(user_id)
     cancelled = await request_download_cancellation(user_id)
-    text_key = "cancelled" if cancelled else "no_active_download"
+    text_key = (
+        "download_queue_cancelled"
+        if cancelled
+        else "no_active_download"
+    )
 
     await safe_edit_message(
         query,
