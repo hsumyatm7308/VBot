@@ -2,8 +2,10 @@ import asyncio
 import subprocess
 import tempfile
 import time
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 
 from utils import (
     DownloadCancelledError,
@@ -11,10 +13,28 @@ from utils import (
     DownloadFileTooLargeError,
     DownloadedFileNotFoundError,
     DownloadFailedError,
+    InsufficientDiskSpaceError,
     InstagramCarouselNotSupportedError,
     InstagramRateLimitError,
     PinterestUnsupportedMediaError,
+    sanitize_log_text,
+    ensure_temporary_disk_space,
 )
+from config import MAX_CONCURRENT_DOWNLOADS
+
+
+_DOWNLOAD_SEMAPHORES = weakref.WeakKeyDictionary()
+_DOWNLOAD_SEMAPHORE_LOCK = Lock()
+
+
+def get_download_semaphore():
+    loop = asyncio.get_running_loop()
+    with _DOWNLOAD_SEMAPHORE_LOCK:
+        semaphore = _DOWNLOAD_SEMAPHORES.get(loop)
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+            _DOWNLOAD_SEMAPHORES[loop] = semaphore
+        return semaphore
 
 
 @dataclass(frozen=True)
@@ -37,11 +57,7 @@ async def prepare_request(update, deps, request_started_at):
         )
         return None
 
-    deps.logger.info(
-        "Download request from user %s (%s)",
-        user_id,
-        update.effective_user.username,
-    )
+    deps.logger.info("Download request from user %s", user_id)
 
     stored_language = deps.get_user_language(user_id)
     if stored_language is None:
@@ -92,37 +108,18 @@ async def prepare_request(update, deps, request_started_at):
         )
         return None
 
-    if platform == "tiktok":
-        resolve_started_at = time.perf_counter()
-        resolve_succeeded = False
-        try:
-            url = await deps.resolve_tiktok_url(url)
-            resolve_succeeded = True
-        finally:
-            deps.log_performance(
-                platform,
-                "resolve",
-                resolve_started_at,
-            )
-            if not resolve_succeeded:
-                deps.log_performance(
-                    platform,
-                    "total",
-                    request_started_at,
-                )
+    if not deps.try_begin_download(user_id):
+        await update.message.reply_text(
+            deps.get_text(language, "active_download")
+        )
+        return None
 
-        platform = deps.get_platform(url)
-
-        if platform is None:
-            deps.log_performance(
-                "tiktok",
-                "total",
-                request_started_at,
-            )
-            await update.message.reply_text(
-                deps.get_text(language, "tiktok_resolve_failed")
-            )
-            return None
+    if not deps.try_record_download_attempt(user_id):
+        deps.finish_download(user_id)
+        await update.message.reply_text(
+            deps.get_text(language, "download_rate_limited")
+        )
+        return None
 
     return DownloadRequest(
         user_id=user_id,
@@ -236,7 +233,6 @@ async def handle_url(update, context, deps):
     language = request.language
     platform = request.platform
 
-    deps.begin_download(user_id)
     current_task = asyncio.current_task()
     if current_task is not None:
         deps.active_download_tasks[user_id] = current_task
@@ -248,6 +244,37 @@ async def handle_url(update, context, deps):
     download_finished = False
 
     try:
+        if platform == "tiktok":
+            resolve_started_at = time.perf_counter()
+            try:
+                resolved_url = await deps.resolve_tiktok_url(request.url)
+            finally:
+                deps.log_performance(
+                    platform,
+                    "resolve",
+                    resolve_started_at,
+                )
+
+            resolved_platform = deps.get_platform(resolved_url)
+            if resolved_platform is None:
+                await update.message.reply_text(
+                    deps.get_text(language, "tiktok_resolve_failed")
+                )
+                return
+
+            request = DownloadRequest(
+                user_id=request.user_id,
+                language=request.language,
+                url=resolved_url,
+                platform=resolved_platform,
+                is_tiktok_photo=(
+                    resolved_platform == "tiktok"
+                    and deps.is_tiktok_photo_url(resolved_url)
+                ),
+                is_instagram_post=False,
+            )
+            platform = request.platform
+
         status_message = await update.message.reply_text(
             deps.get_text(language, "checking"),
             reply_markup=cancel_keyboard,
@@ -268,13 +295,16 @@ async def handle_url(update, context, deps):
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            media_path, media_kind = await acquire_media(
-                request,
-                tmpdir,
-                status_message,
-                cancel_keyboard,
-                deps,
-            )
+            async with get_download_semaphore():
+                deps.raise_if_cancelled(user_id)
+                ensure_temporary_disk_space(tmpdir)
+                media_path, media_kind = await acquire_media(
+                    request,
+                    tmpdir,
+                    status_message,
+                    cancel_keyboard,
+                    deps,
+                )
 
             deps.raise_if_cancelled(user_id)
             status_task = await stop_progress_updates(
@@ -337,6 +367,13 @@ async def handle_url(update, context, deps):
         await deps.safe_edit_status_message(
             status_message,
             deps.get_text(language, "cancelled"),
+            reply_markup=deps.get_home_keyboard(language),
+        )
+
+    except InsufficientDiskSpaceError:
+        await deps.safe_edit_status_message(
+            status_message,
+            deps.get_text(language, "insufficient_disk_space"),
             reply_markup=deps.get_home_keyboard(language),
         )
 
@@ -415,10 +452,12 @@ async def handle_url(update, context, deps):
         else:
             raise
 
-    except Exception:
-        deps.logger.exception(
-            "Unexpected download error for user %s",
+    except Exception as error:
+        deps.logger.error(
+            "Unexpected download error for user %s: %s: %s",
             user_id,
+            type(error).__name__,
+            sanitize_log_text(error),
         )
         await deps.safe_edit_status_message(
             status_message,

@@ -56,8 +56,11 @@ ACTIVE_PROCESSES = process.ACTIVE_PROCESSES
 CANCEL_REQUESTS = process.CANCEL_REQUESTS
 
 begin_download = process.begin_download
+try_begin_download = process.try_begin_download
+try_record_download_attempt = process.try_record_download_attempt
 finish_download = process.finish_download
 is_download_active = process.is_download_active
+get_active_download_count = process.get_active_download_count
 has_active_process = process.has_active_process
 is_download_cancelled = process.is_download_cancelled
 raise_if_cancelled = process.raise_if_cancelled

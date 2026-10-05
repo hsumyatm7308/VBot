@@ -69,12 +69,16 @@ TEXTS = {
             "This bot is private.\n"
             "Access is not available for this account."
         ),
+        "private_chat_only": "Please use this bot in a private chat.",
         "daily_limit_reached": (
             "Daily limit reached\n\n"
             "Limit: {daily_limit}\n"
             "Try again tomorrow."
         ),
         "active_download": "A download is already active.",
+        "download_rate_limited": (
+            "Please wait before starting another download."
+        ),
         "invalid_url": "Send a valid link.",
         "unsupported_url": "This link is not supported.",
         "instagram_story_not_supported": (
@@ -108,6 +112,9 @@ TEXTS = {
         "download_failed": (
             "Download failed\n\n"
             "The source could not be reached. Try again later."
+        ),
+        "insufficient_disk_space": (
+            "Not enough temporary storage is available. Please try again later."
         ),
         "instagram_carousel_not_supported": (
             "Instagram carousel not supported yet."
@@ -212,12 +219,16 @@ TEXTS = {
             "ဤ bot သည် private ဖြစ်ပါသည်။\n"
             "ဤ account ဖြင့် အသုံးပြုခွင့်မရှိပါ။"
         ),
+        "private_chat_only": "ဒီ bot ကို private chat မှာပဲ အသုံးပြုပါ။",
         "daily_limit_reached": (
             "ယနေ့ကန့်သတ်ချက် ပြည့်သွားပါပြီ\n\n"
             "ကန့်သတ်ချက်: {daily_limit}\n"
             "နောက်နေ့တွင် ပြန်စမ်းပါ။"
         ),
         "active_download": "Download တစ်ခု လုပ်ဆောင်နေပြီးဖြစ်သည်။",
+        "download_rate_limited": (
+            "နောက်ထပ် download မစတင်မီ ခဏစောင့်ပါ။"
+        ),
         "invalid_url": "မှန်ကန်သော link တစ်ခု ပို့ပါ။",
         "unsupported_url": "ဤ link ကို support မလုပ်ပါ။",
         "instagram_story_not_supported": (
@@ -251,6 +262,9 @@ TEXTS = {
         "download_failed": (
             "Download မအောင်မြင်ပါ\n\n"
             "မူရင်း source ကို ဆက်သွယ်၍မရပါ။ နောက်မှပြန်စမ်းပါ။"
+        ),
+        "insufficient_disk_space": (
+            "ယာယီသိမ်းဆည်းရန် နေရာမလုံလောက်ပါ။ ခဏနောက်မှ ပြန်စမ်းပါ။"
         ),
         "instagram_carousel_not_supported": (
             "Instagram carousel ကို လက်ရှိ မထောက်ပံ့သေးပါ။"

@@ -7,7 +7,7 @@ from downloader_core.formats import (
     TIKTOK_FORMAT_SORT,
     TIKTOK_VIDEO_FORMAT,
 )
-from utils import error_tail
+from utils import error_tail, sanitize_log_text
 
 
 def build_video_commands(common_options, output_template, url):
@@ -108,9 +108,9 @@ async def make_photo_video(
         logger.warning(
             "ffmpeg failed for user %s: %s",
             user_id,
-            error_tail(result.stderr, 1000),
+            sanitize_log_text(error_tail(result.stderr, 1000)),
         )
-        raise RuntimeError(error_tail(result.stderr, 1000))
+        raise RuntimeError(sanitize_log_text(error_tail(result.stderr, 1000)))
 
 
 async def download_photo(
@@ -149,11 +149,11 @@ async def download_photo(
         logger.warning(
             "gallery-dl failed for user %s: %s",
             user_id,
-            error_tail(result.stderr, 800),
+            sanitize_log_text(error_tail(result.stderr, 800)),
         )
         raise RuntimeError(
             "TikTok photo download မအောင်မြင်ပါ။\n"
-            + error_tail(result.stderr, 800)
+            + sanitize_log_text(error_tail(result.stderr, 800))
         )
 
     images, audios = find_photo_files(gallery_dir)

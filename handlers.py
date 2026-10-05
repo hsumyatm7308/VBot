@@ -36,6 +36,8 @@ from downloaders import (
     is_download_active,
     is_download_cancelled,
     raise_if_cancelled,
+    try_begin_download,
+    try_record_download_attempt,
 )
 from i18n import DEFAULT_LANGUAGE, get_text
 from platforms import (
@@ -87,6 +89,7 @@ handle_terms_callback = commands.handle_terms_callback
 start = commands.start
 help_command = commands.help_command
 status_command = commands.status_command
+stats_command = commands.stats_command
 language_command = commands.language_command
 terms_command = commands.terms_command
 report_command = commands.report_command
@@ -137,6 +140,8 @@ def _download_dependencies():
         increment_daily_usage=increment_daily_usage,
         is_download_active=is_download_active,
         begin_download=begin_download,
+        try_begin_download=try_begin_download,
+        try_record_download_attempt=try_record_download_attempt,
         finish_download=finish_download,
         is_download_cancelled=is_download_cancelled,
         raise_if_cancelled=raise_if_cancelled,

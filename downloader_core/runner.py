@@ -19,6 +19,7 @@ from utils import (
     DownloadFailedError,
     PinterestUnsupportedMediaError,
     error_tail,
+    sanitize_log_text,
 )
 
 
@@ -136,7 +137,7 @@ async def run_download_commands(
             for output in (result.stdout, result.stderr)
             if output
         )
-        output_tail = error_tail(command_output, 1000)
+        output_tail = sanitize_log_text(error_tail(command_output, 1000))
         duration_limited = is_duration_limit_error(command_output)
         file_too_large = is_file_too_large_error(command_output)
         unsupported_media = (

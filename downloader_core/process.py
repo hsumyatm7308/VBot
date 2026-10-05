@@ -2,6 +2,14 @@ import asyncio
 import os
 import signal
 import subprocess
+import time
+from collections import defaultdict, deque
+
+from config import (
+    DOWNLOAD_ATTEMPT_COOLDOWN_SECONDS,
+    DOWNLOAD_ATTEMPT_MAX_PER_WINDOW,
+    DOWNLOAD_ATTEMPT_WINDOW_SECONDS,
+)
 
 from utils import DownloadCancelledError
 
@@ -9,11 +17,40 @@ from utils import DownloadCancelledError
 ACTIVE_USERS: set[int] = set()
 ACTIVE_PROCESSES: dict[int, asyncio.subprocess.Process] = {}
 CANCEL_REQUESTS: set[int] = set()
+DOWNLOAD_ATTEMPTS: dict[int, deque[float]] = defaultdict(deque)
 
 
 def begin_download(user_id: int):
     CANCEL_REQUESTS.discard(user_id)
     ACTIVE_USERS.add(user_id)
+
+
+def try_begin_download(user_id: int) -> bool:
+    """Atomically reserve a user's download in the event-loop thread."""
+    if user_id in ACTIVE_USERS:
+        return False
+
+    begin_download(user_id)
+    return True
+
+
+def try_record_download_attempt(user_id: int) -> bool:
+    """Apply a cooldown and rolling cap without storing submitted URLs."""
+    now = time.monotonic()
+    attempts = DOWNLOAD_ATTEMPTS[user_id]
+    window_start = now - DOWNLOAD_ATTEMPT_WINDOW_SECONDS
+
+    while attempts and attempts[0] <= window_start:
+        attempts.popleft()
+
+    if attempts and now - attempts[-1] < DOWNLOAD_ATTEMPT_COOLDOWN_SECONDS:
+        return False
+
+    if len(attempts) >= DOWNLOAD_ATTEMPT_MAX_PER_WINDOW:
+        return False
+
+    attempts.append(now)
+    return True
 
 
 def finish_download(user_id: int):
@@ -23,6 +60,10 @@ def finish_download(user_id: int):
 
 def is_download_active(user_id: int) -> bool:
     return user_id in ACTIVE_USERS
+
+
+def get_active_download_count() -> int:
+    return len(ACTIVE_USERS)
 
 
 def has_active_process(user_id: int) -> bool:
@@ -37,6 +78,28 @@ def is_download_cancelled(user_id: int) -> bool:
 def raise_if_cancelled(user_id: int):
     if is_download_cancelled(user_id):
         raise DownloadCancelledError
+
+
+def _child_process_environment() -> dict[str, str]:
+    """Pass only runtime essentials to yt-dlp, gallery-dl, and ffmpeg."""
+    allowed_names = {
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+    }
+    if os.name == "nt":
+        allowed_names.update({"SYSTEMROOT", "WINDIR", "PATHEXT"})
+
+    environment = {
+        name: os.environ[name]
+        for name in allowed_names
+        if name in os.environ
+    }
+    environment.setdefault("PATH", os.defpath)
+    return environment
 
 
 def _signal_process(process: asyncio.subprocess.Process, sig: signal.Signals):
@@ -100,6 +163,7 @@ async def run_command(command, user_id: int, timeout: int):
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
+        env=_child_process_environment(),
     )
     ACTIVE_PROCESSES[user_id] = process
 

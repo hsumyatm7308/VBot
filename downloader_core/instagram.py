@@ -8,6 +8,7 @@ from utils import (
     InstagramCarouselNotSupportedError,
     InstagramRateLimitError,
     error_tail,
+    sanitize_log_text,
 )
 
 
@@ -105,7 +106,7 @@ async def download_photo(
         logger.warning(
             "Instagram gallery-dl failed for user %s: %s",
             user_id,
-            error_tail(result.stderr, 800),
+            sanitize_log_text(error_tail(result.stderr, 800)),
         )
 
         raise DownloadFailedError(

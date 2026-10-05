@@ -1,15 +1,24 @@
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from config import DAILY_LIMIT, LEGAL_CONTACT, TERMS_VERSION
+from config import (
+    ADMIN_USER_IDS,
+    DAILY_LIMIT,
+    LEGAL_CONTACT,
+    TERMS_VERSION,
+)
 from database import (
+    get_active_users_today,
     get_daily_usage,
     get_remaining_downloads,
+    get_successful_downloads_today,
+    get_total_successful_users,
     get_user_language,
     has_accepted_terms,
     save_terms_acceptance,
     set_user_language,
 )
+from downloaders import get_active_download_count
 from i18n import DEFAULT_LANGUAGE, get_text
 from telegram_handlers.ui import (
     get_back_keyboard,
@@ -171,6 +180,28 @@ async def status_command(
             terms_status=get_text(language, terms_key),
         ),
         reply_markup=get_back_keyboard(language),
+    )
+
+
+async def stats_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    user_id = update.effective_user.id
+
+    if user_id not in ADMIN_USER_IDS:
+        language = get_language(user_id)
+        await update.message.reply_text(
+            get_text(language, "private_access")
+        )
+        return
+
+    await update.message.reply_text(
+        "📊 VDlp Bot Stats\n\n"
+        f"Total users: {get_total_successful_users()}\n"
+        f"Active today: {get_active_users_today()}\n"
+        f"Downloads today: {get_successful_downloads_today()}\n"
+        f"Currently downloading: {get_active_download_count()}"
     )
 
 

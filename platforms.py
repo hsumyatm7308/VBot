@@ -1,26 +1,77 @@
-from urllib.parse import urlparse
+import ipaddress
+import socket
+import asyncio
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
 
-async def resolve_tiktok_url(url: str) -> str:
-    if not (
-        "vt.tiktok.com" in url
-        or "vm.tiktok.com" in url
-    ):
-        return url
+MAX_TIKTOK_REDIRECTS = 10
+TIKTOK_SHORT_HOSTS = {"vt.tiktok.com", "vm.tiktok.com"}
 
+
+async def _is_safe_tiktok_target(url: str) -> bool:
     try:
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            timeout=15.0,
-        ) as client:
-            response = await client.get(url)
+        parsed = urlparse(url)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.username is not None
+            or parsed.password is not None
+            or not parsed.hostname
+            or get_platform(url) != "tiktok"
+        ):
+            return False
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        host = parsed.hostname.rstrip(".")
+        try:
+            addresses = [ipaddress.ip_address(host)]
+        except ValueError:
+            resolved = await asyncio.to_thread(
+                socket.getaddrinfo,
+                host,
+                port,
+                0,
+                socket.SOCK_STREAM,
+            )
+            addresses = [
+                ipaddress.ip_address(result[4][0].split("%", 1)[0])
+                for result in resolved
+            ]
+        return bool(addresses) and all(address.is_global for address in addresses)
+    except (OSError, TypeError, ValueError):
+        return False
 
-        return str(response.url)
 
+async def resolve_tiktok_url(url: str) -> str | None:
+    try:
+        parsed = urlparse(url)
+        if (parsed.hostname or "").lower().rstrip(".") not in TIKTOK_SHORT_HOSTS:
+            return url
+    except (TypeError, ValueError):
+        return None
+
+    current_url = url
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for _ in range(MAX_TIKTOK_REDIRECTS + 1):
+                if not await _is_safe_tiktok_target(current_url):
+                    return None
+
+                response = await client.get(
+                    current_url,
+                    follow_redirects=False,
+                )
+                if response.status_code not in {301, 302, 303, 307, 308}:
+                    return str(response.url)
+
+                location = response.headers.get("location")
+                if not location:
+                    return None
+                current_url = urljoin(current_url, location)
     except Exception:
-        return url
+        return None
+
+    return None
 
 
 def is_http_url(url: str) -> bool:

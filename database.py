@@ -1,42 +1,60 @@
 import sqlite3
+import os
 from datetime import datetime, timezone
 
 from config import DAILY_LIMIT, DB_PATH, TERMS_VERSION
 
 
 def init_legal_db():
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS legal_acceptances (
-                user_id INTEGER PRIMARY KEY,
-                terms_version TEXT NOT NULL,
-                accepted_at TEXT NOT NULL
-            )
-            """
-        )
+    previous_umask = None
+    if os.name == "posix":
+        # SQLite creates the database using the process umask. Keep a newly
+        # created file private from its first write.
+        previous_umask = os.umask(0o077)
 
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS daily_usage (
-                user_id INTEGER NOT NULL,
-                usage_date TEXT NOT NULL,
-                download_count INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (user_id, usage_date)
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS legal_acceptances (
+                    user_id INTEGER PRIMARY KEY,
+                    terms_version TEXT NOT NULL,
+                    accepted_at TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
 
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS user_preferences (
-                user_id INTEGER PRIMARY KEY,
-                language TEXT NOT NULL
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS daily_usage (
+                    user_id INTEGER NOT NULL,
+                    usage_date TEXT NOT NULL,
+                    download_count INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (user_id, usage_date)
+                )
+                """
             )
-            """
-        )
 
-        conn.commit()
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_preferences (
+                    user_id INTEGER PRIMARY KEY,
+                    language TEXT NOT NULL
+                )
+                """
+            )
+
+            conn.commit()
+    finally:
+        if previous_umask is not None:
+            os.umask(previous_umask)
+
+    if os.name == "posix":
+        try:
+            os.chmod(DB_PATH, 0o600, follow_symlinks=False)
+        except (NotImplementedError, OSError):
+            # Keep Windows and filesystems without POSIX mode support usable.
+            pass
 
 
 def has_accepted_terms(user_id: int) -> bool:
@@ -127,6 +145,51 @@ def increment_daily_usage(user_id: int):
         )
 
         conn.commit()
+
+
+def get_total_successful_users() -> int:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(DISTINCT user_id)
+            FROM daily_usage
+            WHERE download_count > 0
+            """
+        ).fetchone()
+
+    return row[0] if row is not None else 0
+
+
+def get_active_users_today() -> int:
+    today = get_today_utc()
+
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(DISTINCT user_id)
+            FROM daily_usage
+            WHERE usage_date = ? AND download_count > 0
+            """,
+            (today,),
+        ).fetchone()
+
+    return row[0] if row is not None else 0
+
+
+def get_successful_downloads_today() -> int:
+    today = get_today_utc()
+
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            """
+            SELECT COALESCE(SUM(download_count), 0)
+            FROM daily_usage
+            WHERE usage_date = ?
+            """,
+            (today,),
+        ).fetchone()
+
+    return row[0] if row is not None else 0
 
 
 def get_user_language(user_id: int) -> str | None:
